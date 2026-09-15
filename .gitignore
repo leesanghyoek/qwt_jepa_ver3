@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+outputs/
+manifests/
+exports/
+source_revision.txt
+configs/kaggle.yaml

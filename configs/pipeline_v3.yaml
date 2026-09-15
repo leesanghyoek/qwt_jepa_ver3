@@ -1,0 +1,153 @@
+pipeline_version: 3
+run_kind: main
+experiment_name: qwt_jepa_low_light_latent_first_v3
+
+runtime:
+  device: auto
+  gpu_count: auto  # global batches unchanged: auto selects up to two visible GPUs
+  output_dir: outputs/v3
+  log_every_updates: 10
+  checkpoint_every_updates: 250
+  validation_batches: 8
+
+data:
+  root: null
+  manifest_dir: null
+  split_unit: trajectory
+  images_per_sample: 1
+  image_size: [256, 256]
+  imu_window: 128
+  imu_channels: [ax, ay, az, gx, gy, gz]
+  num_workers: 4
+  pin_memory: true
+  shuffle_paired_samples: true
+  shuffle_imu_rows: false
+  corruption_seed: 73128
+  sampler_seed: 73133
+  minimum_trajectories_per_batch: 2
+  train_realization_per_epoch: true
+  validation_realization: 0
+
+model:
+  image_transform: qwt_dualtree_db4
+  imu_transform: haar1d
+  encoder_channels: [32, 64, 96, 128]
+  embedding_dim: 128
+  fusion_hidden_dim: 256
+  predictor_hidden_dim: 256
+  imu_summary_bins: 4
+  time_metadata_dim: 3
+  groupnorm_groups: 8
+  gate_bias_init: -2.0
+
+corruption:
+  image:
+    clean_probability: 0.05
+    segment_seconds: 1.0
+    exposure_gain: [0.10, 0.55]
+    tone_gamma: [1.10, 1.80]
+    white_balance_gain: [0.82, 1.18]
+    black_level: [-0.01, 0.01]
+    vignette_strength: [0.0, 0.45]
+    defocus_probability: 0.80
+    defocus_sigma_px: [0.4, 3.0]
+    motion_probability: 0.65
+    motion_length_px: [3, 17]
+    downsample_probability: 0.35
+    downsample_scale: [0.45, 0.90]
+    photon_count: [25.0, 180.0]
+    read_noise_std: [0.0078431373, 0.0627450980]
+    row_noise_std: [0.0, 0.0156862745]
+    hot_pixel_probability: [0.0, 0.0008]
+    quantization_bits: [6, 8]
+    jpeg_probability: 0.35
+    jpeg_quality: [35, 80]
+  imu:
+    clean_probability: 0.05
+    accel_white_noise_std: [0.05, 0.30]
+    gyro_white_noise_std: [0.002, 0.015]
+    accel_bias_bound: 0.12
+    gyro_bias_bound: 0.008
+    accel_bias_random_walk: 0.008
+    gyro_bias_random_walk: 0.0004
+    scale_error_std: 0.006
+    cross_axis_std: 0.003
+    lowpass_sigma_samples: [0.0, 1.2]
+    quantization_step_accel: [0.0, 0.008]
+    quantization_step_gyro: [0.0, 0.0004]
+    spike_rate_hz: 0.08
+    accel_spike_amplitude: [0.3, 1.5]
+    gyro_spike_amplitude: [0.015, 0.08]
+    dropout_rate_hz: 0.02
+    dropout_length_samples: [2, 8]
+
+phase1:
+  name: latent_pretrain
+  initialization_seed: 73128
+  decoder_enabled: false
+  reconstruction_loss_weight: 0.0
+  coefficient_reconstruction_loss_weight: 0.0
+  online_clean_forward_for_regularization: true
+  regularized_maps: [FI, FU, ZI, ZU, FI_clean, FU_clean, ZI_clean, ZU_clean]
+  jepa_weight: 1.0
+  variance_weight: 1.0
+  covariance_weight: 0.01
+  variance_gamma: 1.0
+  variance_eps: 0.0001
+  image_positions_per_update: 16
+  imu_positions_per_update: 8
+  position_seed: 73132
+  minimum_statistics_batch: 8
+  batch_size: 8
+  gradient_accumulation: 1
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  max_successful_updates: 10000
+  warmup_updates: 500
+  minimum_lr: 0.000001
+  gradient_clip_norm: 5.0
+  teacher_momentum_start: 0.99
+  teacher_momentum_end: 0.999
+  precision: fp32
+
+encoder_sensitivity:
+  enabled: true
+  target: online_dense_before_fusion
+  layer_norm_eps: 0.00001
+  image_epsilon: 0.00392156862745098
+  imu_normalized_epsilon: 0.01
+  alpha: 1.0
+  minimum_energy: 1.0e-12
+  weight_max: 0.0001
+  start_after_updates: 500
+  ramp_updates: 1000
+  probe_seed: 73129
+
+monitor:
+  validation_bank_size: 64
+  relative_rank_std_warning: 0.10
+  raw_scale_ratio_warning: [0.10, 10.0]
+  consecutive_warning_checks: 3
+
+phase2:
+  name: latent_decoder_train
+  backbone_checkpoint: null
+  decoder_initialization_seed: 73131
+  freeze_backbone: true
+  decoder_input: fused_dense_latent_only
+  encoder_skips: false
+  input_coefficient_residual: false
+  output_coefficients: absolute_prediction
+  reconstruction_loss_weight: 1.0
+  jepa_loss_weight: 0.0
+  sensitivity_loss_weight: 0.0
+  batch_size: 4
+  gradient_accumulation: 2
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  max_successful_updates: 5000
+  warmup_updates: 250
+  minimum_lr: 0.000001
+  gradient_clip_norm: 5.0
+  smooth_l1_beta: 1.0
+  precision: fp32

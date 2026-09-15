@@ -1,0 +1,258 @@
+"""Phase 1 trainer: noisy-to-clean JEPA latent learning, never reconstruction."""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+
+import torch
+
+from ..models.pipeline import LatentPretrainingModel
+from ..execution import Phase1Forward, execution_metadata, parallel_forward
+from .checkpoints import configuration_hash, rng_state, state_dict_hash
+from .losses import dense_positions, jepa_latent_loss, variance_covariance_loss
+from .schedules import ema_momentum, warmup_cosine_lr
+from .sensitivity import (
+    encoder_sensitivity_loss,
+    make_probe,
+    sensitivity_weight,
+    stateless_rademacher,
+)
+
+
+def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return {
+        key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
+    }
+
+
+def _position_indices(total: int, maximum: int, seed: int, *context: object) -> torch.Tensor:
+    if maximum >= total:
+        return torch.arange(total)
+    raw = "|".join(str(item) for item in (seed, *context)).encode()
+    derived = int.from_bytes(hashlib.sha256(raw).digest()[:8], "big") >> 1
+    generator = torch.Generator(device="cpu").manual_seed(derived)
+    return torch.randperm(total, generator=generator)[:maximum].sort().values
+
+
+def _finite_gradients(parameters: list[torch.nn.Parameter]) -> bool:
+    return all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in parameters)
+
+
+class Phase1Trainer:
+    LOSS_KEYS = {
+        "loss",
+        "jepa",
+        "jepa_image",
+        "jepa_imu",
+        "variance",
+        "covariance",
+        "encoder_sensitivity",
+        "encoder_sensitivity_weight",
+    }
+
+    def __init__(
+        self,
+        model: LatentPretrainingModel,
+        config: dict[str, Any],
+        device: torch.device,
+        manifest_hash: str = "unknown",
+    ) -> None:
+        self.model = model.to(device)
+        self.config = config
+        self.phase = config["phase1"]
+        self.sensitivity = config["encoder_sensitivity"]
+        self.device = device
+        self.forward_model, self.device_ids = parallel_forward(
+            Phase1Forward(self.model), device, config["runtime"].get("gpu_count", "auto")
+        )
+        self.manifest_hash = manifest_hash
+        self.successful_updates = 0
+        self.parameters = list(model.online_parameters())
+        teacher_ids = {id(parameter) for parameter in model.teachers.parameters()}
+        if any(id(parameter) in teacher_ids for parameter in self.parameters):
+            raise RuntimeError("Teacher parameters leaked into the phase-1 optimizer")
+        self.optimizer = torch.optim.AdamW(
+            self.parameters,
+            lr=self.phase["learning_rate"],
+            weight_decay=self.phase["weight_decay"],
+        )
+        self.initialization_hash = state_dict_hash(model.backbone)
+
+    def _set_lr(self) -> float:
+        lr = warmup_cosine_lr(
+            self.successful_updates,
+            self.phase["max_successful_updates"],
+            self.phase["warmup_updates"],
+            self.phase["learning_rate"],
+            self.phase["minimum_lr"],
+        )
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+        return lr
+
+    def step(self, raw_batch: dict[str, Any]) -> dict[str, float | str | bool]:
+        batch = _to_device(raw_batch, self.device)
+        batch_size = int(batch["image_noisy"].shape[0])
+        minimum_batch = int(self.phase["minimum_statistics_batch"])
+        if batch_size < minimum_batch:
+            raise ValueError(
+                f"Phase-1 batch {batch_size} is below minimum_statistics_batch={minimum_batch}"
+            )
+        self.model.train(True)
+        self.model.normalizer.eval()
+        self.optimizer.zero_grad(set_to_none=True)
+        lr = self._set_lr()
+
+        encoder_weight = sensitivity_weight(
+            self.successful_updates,
+            start_after=self.sensitivity["start_after_updates"],
+            ramp_updates=self.sensitivity["ramp_updates"],
+            maximum=self.sensitivity["weight_max"],
+        ) if self.sensitivity["enabled"] else 0.0
+        source, perturbed, energy = "off", None, None
+        clipped_fraction = 0.0
+        if encoder_weight > 0:
+            source = "image" if self.successful_updates % 2 == 0 else "imu"
+            probe_input = (batch["image_noisy"] if source == "image"
+                           else self.model.normalizer.normalize(batch["imu_noisy_phys"]))
+            direction = stateless_rademacher(
+                probe_input, self.sensitivity["probe_seed"], self.successful_updates,
+                source, *tuple(batch.get("sample_id", ())),
+            )
+            perturbed, energy, clipped_fraction = make_probe(
+                probe_input, source, direction,
+                image_epsilon=self.sensitivity["image_epsilon"],
+                imu_epsilon=self.sensitivity["imu_normalized_epsilon"],
+                alpha=self.sensitivity["alpha"], minimum_energy=self.sensitivity["minimum_energy"],
+            )
+        # Gather dense features, not per-device scalar losses. Statistics below
+        # see all B samples even when each GPU processed only B/2 samples.
+        features = self.forward_model(
+            batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
+            batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
+            probe=perturbed, probe_source=source,
+        )
+        jepa, jepa_image, jepa_imu = jepa_latent_loss(
+            features["prediction_i"], features["prediction_u"], features["target_i"], features["target_u"]
+        )
+
+        image_total = features["FI"].shape[-2] * features["FI"].shape[-1]
+        image_indices = _position_indices(
+            image_total,
+            self.phase["image_positions_per_update"],
+            self.phase["position_seed"],
+            self.successful_updates,
+            "image",
+        )
+        imu_indices = _position_indices(
+            features["FU"].shape[-1],
+            self.phase["imu_positions_per_update"],
+            self.phase["position_seed"],
+            self.successful_updates,
+            "imu",
+        )
+        maps = (
+            (features["FI"], image_indices),
+            (features["FU"], imu_indices),
+            (features["ZI"], image_indices),
+            (features["ZU"], imu_indices),
+            (features["FI_clean"], image_indices),
+            (features["FU_clean"], imu_indices),
+            (features["ZI_clean"], image_indices),
+            (features["ZU_clean"], imu_indices),
+        )
+        regularizers = [
+            variance_covariance_loss(
+                dense_positions(feature, indices),
+                gamma=self.phase["variance_gamma"],
+                eps=self.phase["variance_eps"],
+            )
+            for feature, indices in maps
+        ]
+        variance = torch.stack([item[0] for item in regularizers]).mean()
+        covariance = torch.stack([item[1] for item in regularizers]).mean()
+
+        encoder_term = jepa.new_zeros(())
+        gain_mean = 0.0
+        if encoder_weight > 0:
+            encoder_term, gains = encoder_sensitivity_loss(
+                features["FI" if source == "image" else "FU"],
+                features["probe_feature"],
+                energy,
+                eps=self.sensitivity["layer_norm_eps"],
+            )
+            gain_mean = float(gains.mean())
+
+        total = (
+            self.phase["jepa_weight"] * jepa
+            + self.phase["variance_weight"] * variance
+            + self.phase["covariance_weight"] * covariance
+            + encoder_weight * encoder_term
+        )
+        if not torch.isfinite(total):
+            self.optimizer.zero_grad(set_to_none=True)
+            return {"skipped": True, "reason": "non_finite_loss", "loss": float(total.detach())}
+        total.backward()
+        gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
+        if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
+            self.optimizer.zero_grad(set_to_none=True)
+            return {"skipped": True, "reason": "non_finite_gradient", "loss": float(total.detach())}
+        self.optimizer.step()
+        momentum = ema_momentum(
+            self.successful_updates,
+            self.phase["max_successful_updates"],
+            self.phase["teacher_momentum_start"],
+            self.phase["teacher_momentum_end"],
+        )
+        self.model.teachers.update(self.model.backbone, momentum)
+        self.successful_updates += 1
+        return {
+            "skipped": False,
+            "loss": float(total.detach()),
+            "jepa": float(jepa.detach()),
+            "jepa_image": float(jepa_image.detach()),
+            "jepa_imu": float(jepa_imu.detach()),
+            "variance": float(variance.detach()),
+            "covariance": float(covariance.detach()),
+            "encoder_sensitivity": float(encoder_term.detach()),
+            "encoder_sensitivity_weight": encoder_weight,
+            "encoder_sensitivity_gain": gain_mean,
+            "encoder_source": source,
+            "probe_clipped_fraction": clipped_fraction,
+            "gradient_norm": float(gradient_norm),
+            "teacher_momentum": momentum,
+            "learning_rate": lr,
+            "successful_updates": self.successful_updates,
+        }
+
+    def checkpoint_payload(
+        self,
+        config: dict[str, Any],
+        latent_gate_status: str = "NOT_EVALUATED",
+        latent_metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "metadata": {
+                "pipeline_version": 3,
+                "phase": "latent_pretrain",
+                "trained_with_reconstruction": False,
+                "phase1_decoder_forward_calls": int(self.model.decoder_forward_calls),
+                "successful_updates": self.successful_updates,
+                "data_microbatches_consumed": self.successful_updates,
+                "manifest_hash": self.manifest_hash,
+                "initialization_hash": self.initialization_hash,
+                "backbone_hash": state_dict_hash(self.model.backbone),
+                "normalizer_hash": state_dict_hash(self.model.normalizer),
+                "configuration_hash": configuration_hash(config, "phase1"),
+                "latent_gate_status": latent_gate_status,
+                "execution": execution_metadata(self.device, self.device_ids),
+            },
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "successful_updates": self.successful_updates,
+            "config": config,
+            "rng": rng_state(),
+            "latent_metrics": latent_metrics or {},
+        }

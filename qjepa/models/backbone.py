@@ -1,0 +1,75 @@
+"""Online QWT-JEPA backbone. This module contains no decoder."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+
+from ..transforms import HaarTransform1D, QuaternionWaveletTransform2D, TransformLayout
+from .encoders import DEFAULT_CHANNELS, DenseCoefficientEncoder
+from .fusion import SharedGatedFusion, build_time_metadata
+
+
+@dataclass
+class LatentBatch:
+    FI: torch.Tensor
+    FU: torch.Tensor
+    ZI: torch.Tensor
+    ZU: torch.Tensor
+    image_layout: TransformLayout
+    imu_layout: TransformLayout
+
+
+class MultimodalBackbone(nn.Module):
+    def __init__(
+        self,
+        channels: tuple[int, int, int, int] = DEFAULT_CHANNELS,
+        embedding_dim: int = 128,
+        fusion_hidden: int = 256,
+        imu_summary_bins: int = 4,
+        time_metadata_dim: int = 3,
+        gate_bias: float = -2.0,
+        groups: int = 8,
+    ) -> None:
+        super().__init__()
+        if channels[-1] != embedding_dim:
+            raise ValueError("The final encoder width must equal embedding_dim")
+        self.image_transform = QuaternionWaveletTransform2D()
+        self.imu_transform = HaarTransform1D(channels=6)
+        self.image_encoder = DenseCoefficientEncoder(
+            self.image_transform.coeff_channels, channels, dim=2, groups=groups
+        )
+        self.imu_encoder = DenseCoefficientEncoder(
+            self.imu_transform.coeff_channels, channels, dim=1, groups=groups
+        )
+        self.fusion = SharedGatedFusion(
+            embedding_dim,
+            fusion_hidden,
+            imu_bins=imu_summary_bins,
+            metadata_dim=time_metadata_dim,
+            gate_bias=gate_bias,
+        )
+
+    def encode_image_dense(self, image: torch.Tensor) -> torch.Tensor:
+        coefficients, _ = self.image_transform.analysis(image)
+        return self.image_encoder(coefficients)
+
+    def encode_imu_dense(self, imu_normalized: torch.Tensor) -> torch.Tensor:
+        coefficients, _ = self.imu_transform.analysis(imu_normalized)
+        return self.imu_encoder(coefficients)
+
+    def encode_online(
+        self,
+        image: torch.Tensor,
+        imu_normalized: torch.Tensor,
+        image_time: torch.Tensor,
+        imu_times: torch.Tensor,
+    ) -> LatentBatch:
+        image_coeff, image_layout = self.image_transform.analysis(image)
+        imu_coeff, imu_layout = self.imu_transform.analysis(imu_normalized)
+        fi = self.image_encoder(image_coeff)
+        fu = self.imu_encoder(imu_coeff)
+        zi, zu = self.fusion(fi, fu, build_time_metadata(image_time, imu_times))
+        return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout)

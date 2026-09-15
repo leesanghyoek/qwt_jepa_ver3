@@ -1,0 +1,30 @@
+# Recipe chinh cho Kaggle + dataset TartanAir V2 cua ban (14 environment, 166
+# trajectory, anh 256x256 RGB, IMU 100 Hz, camera 10 Hz).
+#
+# Chi khac pipeline_v3.yaml o duong dan va cac tham so phu thuoc may:
+# thiet bi, so GPU, so worker va thu muc ghi ket qua. Kien truc, corruption,
+# loss va lich train giu nguyen — doi nhung thu do la doi semantics va phai bat
+# dau run moi.
+#
+# DATA_ROOT phai la thu muc co CON TRUC TIEP la cac environment:
+#   <root>/AmericanDiner/Data_easy/P000/image_lcam_front/*.png
+#   <root>/AmericanDiner/Data_easy/P000/imu/{acc,gyro,imu_time,cam_time}.npy
+# Tro cao hon mot bac se nhat them ban sao trong tartanair-v2-jepa/train va
+# build-manifest se bao loi "Mixed explicit and missing split directories".
+extends: pipeline_v3.yaml
+experiment_name: qwt_jepa_low_light_latent_first_v3_kaggle
+
+runtime:
+  device: cuda
+  gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
+  output_dir: /kaggle/working/outputs/v3
+  log_every_updates: 10
+  checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
+  validation_batches: 8
+
+data:
+  # Cell 3 tu do lai duong dan nay va ghi de neu mount khac.
+  root: /kaggle/input/tartanairkhoi/tartanair-v2
+  manifest_dir: /kaggle/working/outputs/manifest
+  num_workers: 2         # notebook GPU cua Kaggle chi co 4 vCPU
+  pin_memory: true

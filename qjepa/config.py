@@ -1,0 +1,186 @@
+"""Configuration loading, validation, and object factories."""
+
+from __future__ import annotations
+
+import copy
+import random
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+import yaml
+
+from .corruptions import (
+    ImuCorruptionConfig,
+    LowLightImageCorruptionConfig,
+    LowLightImageCorruptor,
+    TrajectoryImuCorruptor,
+)
+from .data.normalize import ImuNormalizer
+from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
+
+
+def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    path = Path(path).resolve()
+    with path.open(encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("Top-level YAML config must be a mapping")
+    parent = raw.pop("extends", None)
+    if parent:
+        parent_path = (path.parent / parent).resolve()
+        config = _merge(load_config(parent_path), raw)
+    else:
+        config = raw
+    config["_config_path"] = str(path)
+    validate_config(config)
+    return config
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    if config.get("pipeline_version") != 3:
+        raise ValueError("pipeline_version must be exactly 3")
+    run_kind = config.get("run_kind", "main")
+    if run_kind not in {"main", "smoke"}:
+        raise ValueError("run_kind must be main or smoke")
+    data = config["data"]
+    phase1 = config["phase1"]
+    phase2 = config["phase2"]
+    model = config["model"]
+    if str(config["runtime"].get("gpu_count", "auto")) not in {"auto", "1", "2"}:
+        raise ValueError("runtime.gpu_count must be auto, 1 or 2")
+    if model.get("image_transform") != "qwt_dualtree_db4" or model.get("imu_transform") != "haar1d":
+        raise ValueError("v3 supports qwt_dualtree_db4 for RGB and haar1d for IMU")
+    if model.get("time_metadata_dim") != 3 or model.get("imu_summary_bins") != 4:
+        raise ValueError("v3 fusion requires three time metadata values and four IMU summary bins")
+    if run_kind == "main":
+        if data.get("image_size") != [256, 256] or data.get("imu_window") != 128:
+            raise ValueError("Main v3 requires one RGB 256x256 frame and an IMU window of 128")
+        if phase1.get("batch_size", 0) < max(8, phase1.get("minimum_statistics_batch", 8)):
+            raise ValueError("Phase-1 physical batch must meet minimum_statistics_batch")
+        if config["monitor"].get("validation_bank_size", 64) < 64:
+            raise ValueError("Main validation_bank_size must be at least 64 (or all available samples)")
+    if config["monitor"].get("validation_bank_size", 64) < 2:
+        raise ValueError("Validation bank needs at least two samples")
+    for phase in (phase1, phase2):
+        for key in ("batch_size", "gradient_accumulation", "max_successful_updates"):
+            if not isinstance(phase.get(key), int) or phase[key] < 1:
+                raise ValueError(f"{key} must be a positive integer")
+    for key in ("validation_batches", "log_every_updates", "checkpoint_every_updates"):
+        if config["runtime"].get(key, 0) < 1:
+            raise ValueError(f"runtime.{key} must be positive")
+    forbidden_phase1 = {
+        "decoder_enabled": False,
+        "reconstruction_loss_weight": 0.0,
+        "coefficient_reconstruction_loss_weight": 0.0,
+    }
+    for key, required in forbidden_phase1.items():
+        if phase1.get(key) != required:
+            raise ValueError(f"phase1.{key} must be {required!r}")
+    if phase1.get("gradient_accumulation", 1) != 1:
+        raise ValueError("Phase 1 uses real batch statistics; gradient_accumulation must be 1")
+    if not phase1.get("online_clean_forward_for_regularization", False):
+        raise ValueError("Phase 1 requires the gradient-enabled clean online branch")
+    if phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0:
+        raise ValueError("Main latent training requires explicit variance and covariance losses")
+    if phase1.get("jepa_weight") != 1.0 or phase1.get("precision") != "fp32":
+        raise ValueError("Supported phase-1 recipe requires jepa_weight=1 and FP32")
+    required_maps = {"FI", "FU", "ZI", "ZU", "FI_clean", "FU_clean", "ZI_clean", "ZU_clean"}
+    if set(phase1.get("regularized_maps", ())) != required_maps:
+        raise ValueError("phase1.regularized_maps must contain all eight raw feature maps")
+    required_phase2 = {
+        "freeze_backbone": True,
+        "decoder_input": "fused_dense_latent_only",
+        "encoder_skips": False,
+        "input_coefficient_residual": False,
+        "output_coefficients": "absolute_prediction",
+    }
+    for key, required in required_phase2.items():
+        if phase2.get(key) != required:
+            raise ValueError(f"phase2.{key} must be {required!r}")
+    if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
+        raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
+    if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":
+        raise ValueError("Supported phase-2 recipe requires reconstruction weight 1 and FP32")
+    if data.get("split_unit") != "trajectory":
+        raise ValueError("Data split unit must be trajectory")
+    if data.get("minimum_trajectories_per_batch", 0) < 1:
+        raise ValueError("minimum_trajectories_per_batch must be positive")
+
+
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+    return device
+
+
+def build_normalizer(metadata: dict[str, Any]) -> ImuNormalizer:
+    normalization = metadata["normalization"]
+    return ImuNormalizer(normalization["mean"], normalization["std"])
+
+
+def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
+    model = config["model"]
+    channels = tuple(model["encoder_channels"])
+    return MultimodalBackbone(
+        channels=channels,
+        embedding_dim=model["embedding_dim"],
+        fusion_hidden=model["fusion_hidden_dim"],
+        imu_summary_bins=model["imu_summary_bins"],
+        time_metadata_dim=model["time_metadata_dim"],
+        gate_bias=model["gate_bias_init"],
+        groups=model["groupnorm_groups"],
+    )
+
+
+def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> LatentPretrainingModel:
+    return LatentPretrainingModel(
+        backbone=build_backbone(config),
+        normalizer=normalizer,
+        predictor_hidden=config["model"]["predictor_hidden_dim"],
+    )
+
+
+def build_decoders(config: dict[str, Any]) -> LatentDecoders:
+    image_size = config["data"]["image_size"]
+    return LatentDecoders(
+        image_coefficient_size=(image_size[0] // 2, image_size[1] // 2),
+        imu_coefficient_length=config["data"]["imu_window"] // 2,
+        channels=tuple(config["model"]["encoder_channels"]),
+        groups=config["model"]["groupnorm_groups"],
+    )
+
+
+def build_corruptors(config: dict[str, Any]):
+    image_values = config["corruption"]["image"]
+    imu_values = config["corruption"]["imu"]
+    image_cfg = LowLightImageCorruptionConfig(**image_values)
+    imu_cfg = ImuCorruptionConfig(**imu_values)
+    seed = config["data"]["corruption_seed"]
+    return LowLightImageCorruptor(image_cfg, seed), TrajectoryImuCorruptor(imu_cfg, seed)
+
+
+def serializable_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in config.items() if not key.startswith("_")}

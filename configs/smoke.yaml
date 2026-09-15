@@ -1,0 +1,39 @@
+extends: pipeline_v3.yaml
+run_kind: smoke
+experiment_name: qwt_jepa_v3_smoke
+
+runtime:
+  device: cpu
+  output_dir: outputs/smoke
+  checkpoint_every_updates: 1
+
+data:
+  image_size: [32, 32]
+  imu_window: 32
+  num_workers: 0
+  pin_memory: false
+  minimum_trajectories_per_batch: 1
+
+model:
+  encoder_channels: [8, 16, 24, 32]
+  embedding_dim: 32
+  fusion_hidden_dim: 64
+  predictor_hidden_dim: 64
+
+phase1:
+  minimum_statistics_batch: 2
+  batch_size: 2
+  max_successful_updates: 1
+  warmup_updates: 0
+  image_positions_per_update: 4
+  imu_positions_per_update: 2
+
+encoder_sensitivity:
+  start_after_updates: 0
+  ramp_updates: 1
+
+phase2:
+  batch_size: 1
+  gradient_accumulation: 1
+  max_successful_updates: 1
+  warmup_updates: 0

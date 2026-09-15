@@ -1,0 +1,6 @@
+extends: pipeline_v3.yaml
+experiment_name: qwt_jepa_low_light_control_no_jacobian_v3
+
+encoder_sensitivity:
+  enabled: false
+

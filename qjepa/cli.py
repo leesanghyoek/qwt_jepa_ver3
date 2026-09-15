@@ -1,0 +1,1029 @@
+"""Command-line entrypoints for data preparation, both training phases, and inference."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Iterator
+
+import numpy as np
+import torch
+import yaml
+from PIL import Image
+from torch.utils.data import DataLoader
+
+from .config import (
+    build_backbone,
+    build_corruptors,
+    build_decoders,
+    build_normalizer,
+    build_phase1_model,
+    load_config,
+    resolve_device,
+    seed_everything,
+    serializable_config,
+)
+from .data import (
+    ImuNormalizer,
+    PairedCameraImuDataset,
+    TrajectoryDiverseBatchSampler,
+    build_manifest,
+    collate_paired,
+    read_manifest,
+    write_manifest,
+)
+from .data.dataset import load_rgb
+from .corruptions.rng import derive_seed
+from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
+from .evaluation.reporting import (
+    evaluation_summary, image_panel, plot_training, save_imu_result, write_csv, write_json,
+)
+from .models import LatentPretrainingModel, RestorationSystem
+from .execution import Phase1Forward, RestorationForward, execution_metadata, parallel_forward, select_device_ids
+from .training.checkpoints import (
+    atomic_torch_save,
+    configuration_hash,
+    load_checkpoint,
+    require_phase1_checkpoint,
+    restore_rng_state,
+    state_dict_hash,
+)
+from .training.losses import jepa_latent_loss
+from .training.phase1 import Phase1Trainer, _to_device
+from .training.phase2 import Phase2Trainer
+
+
+def _config_path(value: str | None) -> Path:
+    return Path(value or "configs/pipeline_v3.yaml")
+
+
+def _configure_execution(config: dict[str, Any], args: argparse.Namespace, device: torch.device,
+                         *, use_saved_setting: bool = True) -> dict[str, Any]:
+    count = getattr(args, "gpus", None) or (config["runtime"].get("gpu_count", "auto") if use_saved_setting else "auto")
+    config["runtime"]["gpu_count"] = count
+    info = execution_metadata(device, select_device_ids(device, count))
+    print("Execution: " + json.dumps(info))
+    return info
+
+
+def _manifest(config: dict[str, Any], override: str | None):
+    location = override or config["data"].get("manifest_dir")
+    if not location:
+        raise ValueError("Set data.manifest_dir in YAML or pass --manifest")
+    return read_manifest(location), str(Path(location).resolve())
+
+
+def _dataset(
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    split: str,
+    *,
+    fixed_realization: bool,
+    image_mode: str = "full",
+    imu_mode: str = "full",
+) -> PairedCameraImuDataset:
+    image_corruptor, imu_corruptor = build_corruptors(config)
+    if fixed_realization:
+        image_corruptor.config = replace(image_corruptor.config, clean_probability=0.0)
+        imu_corruptor.config = replace(imu_corruptor.config, clean_probability=0.0)
+    samples = manifest["samples"][split]
+    if not samples:
+        raise ValueError(f"Manifest split {split!r} is empty")
+    return PairedCameraImuDataset(
+        samples,
+        image_corruptor=image_corruptor,
+        imu_corruptor=imu_corruptor,
+        image_size=tuple(config["data"]["image_size"]),
+        realization=config["data"]["validation_realization"] if fixed_realization else 0,
+        image_mode=image_mode,
+        imu_mode=imu_mode,
+    )
+
+
+def _loader(
+    config: dict[str, Any],
+    dataset: PairedCameraImuDataset,
+    batch_size: int,
+    *,
+    train: bool,
+    generator: torch.Generator | None = None,
+    batch_sampler: TrajectoryDiverseBatchSampler | None = None,
+) -> DataLoader:
+    common = {
+        "dataset": dataset,
+        "num_workers": config["data"]["num_workers"],
+        "pin_memory": config["data"]["pin_memory"] and torch.cuda.is_available(),
+        "collate_fn": collate_paired,
+        "persistent_workers": False,
+        "generator": generator,
+    }
+    if batch_sampler is not None:
+        return DataLoader(batch_sampler=batch_sampler, **common)
+    return DataLoader(
+        batch_size=batch_size,
+        shuffle=train and config["data"]["shuffle_paired_samples"],
+        drop_last=train,
+        **common,
+    )
+
+
+def _training_batch_stream(
+    config: dict[str, Any],
+    dataset: PairedCameraImuDataset,
+    batch_size: int,
+    *,
+    start_microbatch: int,
+    namespace: str,
+) -> Iterator[dict[str, Any]]:
+    batches_per_epoch = len(dataset) // batch_size
+    if batches_per_epoch < 1:
+        raise ValueError("Dataset has fewer samples than one full training batch")
+    epoch, first_batch = divmod(start_microbatch, batches_per_epoch)
+    while True:
+        dataset.set_realization(epoch if config["data"].get("train_realization_per_epoch", True) else 0)
+        epoch_seed = derive_seed(
+            config["data"]["sampler_seed"], "sampler", namespace, epoch
+        )
+        trajectory_keys = [sample.trajectory_key for sample in dataset.samples]
+        batch_sampler = TrajectoryDiverseBatchSampler(
+            trajectory_keys,
+            batch_size,
+            config["data"]["minimum_trajectories_per_batch"],
+            epoch_seed,
+        )
+        loader = _loader(
+            config,
+            dataset,
+            batch_size,
+            train=True,
+            generator=torch.Generator().manual_seed(epoch_seed),
+            batch_sampler=batch_sampler,
+        )
+        produced = False
+        for batch_index, batch in enumerate(loader):
+            if batch_index < first_batch:
+                continue
+            produced = True
+            yield batch
+        if not produced:
+            raise ValueError("DataLoader produced no remaining full training batches")
+        epoch += 1
+        first_batch = 0
+
+
+class _Jsonl:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+
+    def write(self, payload: dict[str, Any]) -> None:
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _prepare_run(output: Path, resume: str | None, update: int) -> None:
+    if not resume and any((output / name).exists() for name in ("last.pt", "train.jsonl")):
+        raise ValueError(f"Existing training run at {output}; use --resume or choose a new --output")
+    log = output / "train.jsonl"
+    if resume and log.exists():
+        # A crash may leave log entries newer than the last atomic checkpoint.
+        records = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+        retained = [record for record in records if int(record.get("successful_updates", 0)) <= update]
+        log.write_text("".join(json.dumps(record) + "\n" for record in retained), encoding="utf-8")
+
+
+def _fixed_validation_bank(dataset: PairedCameraImuDataset, size: int) -> None:
+    """Round-robin trajectories and spread frames across each trajectory's timeline."""
+    groups: dict[str, list[Any]] = {}
+    for sample in dataset.samples:
+        groups.setdefault(sample.trajectory_key, []).append(sample)
+    quotas = {key: 0 for key in sorted(groups)}
+    remaining = min(size, len(dataset.samples))
+    while remaining:
+        for key in quotas:
+            if remaining and quotas[key] < len(groups[key]):
+                quotas[key] += 1
+                remaining -= 1
+    selected = []
+    for key, count in quotas.items():
+        rows = sorted(groups[key], key=lambda sample: sample.image_time)
+        index = np.linspace(0, len(rows) - 1, count, dtype=int)
+        selected.extend(rows[item] for item in index)
+    dataset.samples = selected
+
+
+def _write_resolved(config: dict[str, Any], output: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "resolved_config.yaml").write_text(
+        yaml.safe_dump(serializable_config(config), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
+@torch.no_grad()
+def _validate_latent(
+    model: LatentPretrainingModel,
+    loader: DataLoader,
+    device: torch.device,
+    maximum_batches: int,
+    forward_model: torch.nn.Module | None = None,
+) -> dict[str, float]:
+    model.eval()
+    runner = forward_model if forward_model is not None else Phase1Forward(model)
+    collected: dict[str, list[float]] = {}
+    bank: dict[str, list[torch.Tensor]] = {}
+    counts = []
+    for index, raw in enumerate(loader):
+        if index >= maximum_batches:
+            break
+        batch = _to_device(raw, device)
+        outputs = runner(
+            batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
+            batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
+        )
+        total, image, imu = jepa_latent_loss(
+            outputs["prediction_i"], outputs["prediction_u"], outputs["target_i"], outputs["target_u"]
+        )
+        counts.append(batch["image_clean"].shape[0])
+        values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu)}
+        features = (
+            ("noisy_FI", outputs["FI"]),
+            ("noisy_FU", outputs["FU"]),
+            ("noisy_ZI", outputs["ZI"]),
+            ("noisy_ZU", outputs["ZU"]),
+            ("clean_FI", outputs["FI_clean"]),
+            ("clean_FU", outputs["FU_clean"]),
+            ("clean_ZI", outputs["ZI_clean"]),
+            ("clean_ZU", outputs["ZU_clean"]),
+            ("teacher_TI", outputs["target_i"]),
+            ("teacher_TU", outputs["target_u"]),
+        )
+        for name, feature in features:
+            bank.setdefault(name, []).append(feature.cpu())
+        for key, value in values.items():
+            collected.setdefault(key, []).append(value)
+    result = {f"validation_{key}": float(np.average(values, weights=counts)) for key, values in collected.items()}
+    for name, features in bank.items():
+        feature = torch.cat(features)
+        if feature.shape[0] >= 2:
+            for metric, value in latent_diagnostics(feature).items():
+                result[f"validation_{name}_{metric}"] = value
+    result["validation_bank_samples"] = sum(counts)
+    return result
+
+
+def _latent_gate(
+    reference: dict[str, float], current: dict[str, float], monitor: dict[str, Any]
+) -> tuple[bool, list[str]]:
+    relative_floor = float(monitor["relative_rank_std_warning"])
+    raw_low, raw_high = (float(value) for value in monitor["raw_scale_ratio_warning"])
+    reasons: list[str] = []
+    diagnostic_keys = [
+        key
+        for key in reference
+        if key.endswith(("same_position_std", "pooled_effective_rank", "raw_rms"))
+    ]
+    if not diagnostic_keys:
+        return False, ["validation bank did not provide diversity diagnostics (need batch >= 2)"]
+    for key in diagnostic_keys:
+        if key not in current or not np.isfinite(current[key]):
+            reasons.append(f"{key} missing or non-finite")
+            continue
+        denominator = max(abs(reference[key]), 1e-12)
+        ratio = current[key] / denominator
+        if key.endswith("raw_rms"):
+            if ratio < raw_low or ratio > raw_high:
+                reasons.append(f"{key} scale ratio {ratio:.4g} outside [{raw_low},{raw_high}]")
+        elif ratio < relative_floor:
+            reasons.append(f"{key} diversity ratio {ratio:.4g} below {relative_floor}")
+    return not reasons, reasons
+
+
+@torch.no_grad()
+def _evaluate_with_overlap(
+    system: RestorationSystem,
+    loader: DataLoader,
+    dataset: PairedCameraImuDataset,
+    device: torch.device,
+    maximum_batches: int,
+    smooth_l1_beta: float = 1.0,
+    output: Path | None = None,
+    panels: int = 6,
+    label: str = "evaluation",
+    forward_model: torch.nn.Module | None = None,
+) -> dict[str, float | list[float] | int]:
+    """Final metrics: each physical IMU timestamp is counted once after merging."""
+    system.eval()
+    trajectory_lengths: dict[str, int] = {}
+    for sample in dataset.samples:
+        trajectory_lengths[sample.trajectory_key] = max(
+            trajectory_lengths.get(sample.trajectory_key, 0), sample.imu_end
+        )
+    predicted_mergers = {
+        key: ImuOverlapMerger(length) for key, length in trajectory_lengths.items()
+    }
+    clean_mergers = {key: ImuOverlapMerger(length) for key, length in trajectory_lengths.items()}
+    noisy_mergers = {key: ImuOverlapMerger(length) for key, length in trajectory_lengths.items()}
+    trajectory_times = {
+        key: np.full(length, np.nan, dtype=np.float64) for key, length in trajectory_lengths.items()
+    }
+    image_values: dict[str, list[float]] = {}
+    frame_rows = []
+    frame_index = 0
+    estimated_frames = min(len(dataset.samples), maximum_batches * getattr(loader, "batch_size", 1))
+    panel_indices = set(np.linspace(0, max(0, estimated_frames - 1), min(panels, estimated_frames), dtype=int))
+    for batch_index, raw in enumerate(loader):
+        if batch_index >= maximum_batches:
+            break
+        batch = _to_device(raw, device)
+        inputs = (batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"])
+        if forward_model is None:
+            native = system(*inputs)
+            restored = {"image": native.image, "imu_physical": native.imu_physical}
+        else:
+            restored = forward_model(*inputs)
+        for row in range(restored["image"].shape[0]):
+            metrics = image_metrics(restored["image"][row : row + 1], batch["image_clean"][row : row + 1])
+            metrics.update({f"baseline_{key}": value for key, value in image_metrics(
+                batch["image_noisy"][row : row + 1], batch["image_clean"][row : row + 1]
+            ).items()})
+            for key, value in metrics.items():
+                image_values.setdefault(key, []).append(value)
+            trajectory = raw["trajectory_key"][row]
+            if output is not None:
+                sample_id = raw.get("sample_id", [str(frame_index)] * restored["image"].shape[0])[row]
+                frame_rows.append({"sample_id": sample_id, "trajectory": trajectory, **metrics})
+                if frame_index in panel_indices:
+                    arrays = [tensor[row].detach().cpu().permute(1, 2, 0).numpy()
+                              for tensor in (batch["image_clean"], batch["image_noisy"], restored["image"])]
+                    image_panel(output / "images" / f"frame_{frame_index:06d}.png", *arrays,
+                                f"{label} | {sample_id} | PSNR {metrics['baseline_image_psnr_db']:.2f} → {metrics['image_psnr_db']:.2f} dB")
+            frame_index += 1
+            start = int(raw["imu_start"][row])
+            prediction = restored["imu_physical"][row].transpose(0, 1).cpu().numpy()
+            clean = batch["imu_clean_phys"][row].transpose(0, 1).cpu().numpy()
+            times = raw["imu_times"][row].cpu().numpy()
+            predicted_mergers[trajectory].add(start, prediction)
+            clean_mergers[trajectory].add(start, clean)
+            noisy_mergers[trajectory].add(start, batch["imu_noisy_phys"][row].transpose(0, 1).cpu().numpy())
+            end = start + len(times)
+            existing = trajectory_times[trajectory][start:end]
+            conflict = np.isfinite(existing) & ~np.isclose(existing, times, rtol=0, atol=1e-9)
+            if conflict.any():
+                raise ValueError(f"Inconsistent overlapping IMU timestamps in {trajectory}")
+            trajectory_times[trajectory][start:end] = times
+
+    errors, baseline_errors, variation_errors, baseline_variations = [], [], [], []
+    imu_files = []
+    covered_rows = 0
+    for trajectory in trajectory_lengths:
+        predicted, predicted_coverage = predicted_mergers[trajectory].result()
+        clean, clean_coverage = clean_mergers[trajectory].result()
+        noisy, noisy_coverage = noisy_mergers[trajectory].result()
+        coverage = predicted_coverage & clean_coverage & noisy_coverage & np.isfinite(trajectory_times[trajectory])
+        covered_rows += int(coverage.sum())
+        errors.append(predicted[coverage] - clean[coverage])
+        baseline_errors.append(noisy[coverage] - clean[coverage])
+        if output is not None and coverage.any():
+            stem = save_imu_result(output / "imu", trajectory, trajectory_times[trajectory],
+                                   clean, noisy, predicted, coverage, make_plot=len(imu_files) < panels, label=label)
+            imu_files.append({"trajectory": trajectory, "file": f"imu/{stem}.npz", "covered_rows": int(coverage.sum())})
+        adjacent = coverage[:-1] & coverage[1:]
+        if adjacent.any():
+            dt = np.diff(trajectory_times[trajectory])[adjacent]
+            if not np.isfinite(dt).all() or (dt <= 0).any():
+                raise ValueError(f"Invalid IMU time differences in {trajectory}")
+            predicted_rate = np.diff(predicted, axis=0)[adjacent] / dt[:, None]
+            clean_rate = np.diff(clean, axis=0)[adjacent] / dt[:, None]
+            variation_errors.append(predicted_rate - clean_rate)
+            baseline_variations.append(np.diff(noisy, axis=0)[adjacent] / dt[:, None] - clean_rate)
+    if not errors or covered_rows == 0:
+        raise ValueError("Evaluation produced no covered IMU timestamps")
+    error = np.concatenate(errors, axis=0)
+    baseline_error = np.concatenate(baseline_errors, axis=0)
+    rmse_axis = np.sqrt(np.mean(np.square(error), axis=0))
+    mae_axis = np.mean(np.abs(error), axis=0)
+    bias_axis = np.mean(error, axis=0)
+    result: dict[str, float | list[float] | int] = {
+        key: float(np.mean(value)) for key, value in image_values.items()
+    }
+    result.update(
+        {
+            "imu_covered_unique_rows": covered_rows,
+            "image_count": frame_index,
+            "imu_rmse_axis": rmse_axis.tolist(),
+            "imu_mae_axis": mae_axis.tolist(),
+            "imu_bias_axis": bias_axis.tolist(),
+            "accel_rmse": float(np.sqrt(np.mean(np.square(error[:, :3])))),
+            "gyro_rmse": float(np.sqrt(np.mean(np.square(error[:, 3:])))),
+        }
+    )
+    result.update({
+        "baseline_imu_rmse_axis": np.sqrt(np.square(baseline_error).mean(axis=0)).tolist(),
+        "baseline_imu_mae_axis": np.abs(baseline_error).mean(axis=0).tolist(),
+        "baseline_imu_bias_axis": baseline_error.mean(axis=0).tolist(),
+        "baseline_accel_rmse": float(np.sqrt(np.square(baseline_error[:, :3]).mean())),
+        "baseline_gyro_rmse": float(np.sqrt(np.square(baseline_error[:, 3:]).mean())),
+    })
+    scale = system.normalizer.scale.detach().cpu().numpy()
+    normalized_absolute = np.abs(error / scale[None, :])
+    smooth = np.where(
+        normalized_absolute < smooth_l1_beta,
+        0.5 * np.square(normalized_absolute) / smooth_l1_beta,
+        normalized_absolute - 0.5 * smooth_l1_beta,
+    )
+    accel_smooth = float(smooth[:, :3].mean())
+    gyro_smooth = float(smooth[:, 3:].mean())
+    result["joint_validation_score"] = float(result["image_mae"]) + 0.5 * (
+        accel_smooth + gyro_smooth
+    )
+    result["imu_accel_smooth_l1_normalized"] = accel_smooth
+    result["imu_gyro_smooth_l1_normalized"] = gyro_smooth
+    if variation_errors:
+        variation = np.concatenate(variation_errors, axis=0)
+        result["accel_variation_rmse"] = float(np.sqrt(np.mean(np.square(variation[:, :3]))))
+        result["gyro_variation_rmse"] = float(np.sqrt(np.mean(np.square(variation[:, 3:]))))
+        baseline_variation = np.concatenate(baseline_variations, axis=0)
+        result["baseline_accel_variation_rmse"] = float(np.sqrt(np.square(baseline_variation[:, :3]).mean()))
+        result["baseline_gyro_variation_rmse"] = float(np.sqrt(np.square(baseline_variation[:, 3:]).mean()))
+    if output is not None:
+        write_csv(output / "per_frame.csv", frame_rows)
+        write_json(output / "imu_index.json", imu_files)
+    return result
+
+
+def command_build_manifest(args: argparse.Namespace) -> None:
+    config = load_config(_config_path(args.config))
+    root = args.data_root or config["data"].get("root")
+    if not root:
+        raise ValueError("Pass --data-root or set data.root")
+    manifest = build_manifest(root, window=config["data"]["imu_window"], seed=config["data"]["corruption_seed"])
+    write_manifest(manifest, args.output)
+    print(json.dumps(manifest["meta"]["samples_per_split"], indent=2))
+
+
+def command_train_phase1(args: argparse.Namespace) -> None:
+    config = load_config(_config_path(args.config))
+    manifest, _ = _manifest(config, args.manifest)
+    device = resolve_device(args.device or config["runtime"]["device"])
+    execution = _configure_execution(config, args, device)
+    seed_everything(config["phase1"]["initialization_seed"])
+    normalizer = build_normalizer(manifest["meta"])
+    model = build_phase1_model(config, normalizer)
+    trainer = Phase1Trainer(model, config, device, manifest["meta"]["manifest_hash"])
+    resume_payload = None
+    if args.resume:
+        resume_payload = load_checkpoint(args.resume, device)
+        require_phase1_checkpoint(resume_payload)
+        if resume_payload["metadata"].get("manifest_hash") != manifest["meta"]["manifest_hash"]:
+            raise ValueError("Phase-1 resume manifest differs from training data")
+        if resume_payload["metadata"].get("normalizer_hash") != state_dict_hash(normalizer):
+            raise ValueError("Phase-1 resume normalization differs from training data")
+        if resume_payload["metadata"].get("configuration_hash") != configuration_hash(config, "phase1"):
+            raise ValueError("Phase-1 resume config changes training semantics")
+        model.load_state_dict(resume_payload["model"], strict=True)
+        trainer.optimizer.load_state_dict(resume_payload["optimizer"])
+        trainer.successful_updates = int(resume_payload["successful_updates"])
+        if resume_payload["metadata"].get("data_microbatches_consumed") != trainer.successful_updates:
+            raise ValueError("Phase-1 resume checkpoint has inconsistent data progress")
+        trainer.initialization_hash = resume_payload["metadata"]["initialization_hash"]
+        restore_rng_state(resume_payload["rng"])
+
+    train_dataset = _dataset(config, manifest, "train", fixed_realization=False)
+    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    _fixed_validation_bank(validation_dataset, config["monitor"].get("validation_bank_size", 64))
+    validation_loader = _loader(config, validation_dataset, config["phase1"]["batch_size"], train=False)
+    batches = _training_batch_stream(
+        config,
+        train_dataset,
+        config["phase1"]["batch_size"],
+        start_microbatch=trainer.successful_updates,
+        namespace="phase1",
+    )
+    output = Path(args.output or config["runtime"]["output_dir"]) / "phase1"
+    _prepare_run(output, args.resume, trainer.successful_updates)
+    _write_resolved(config, output)
+    write_json(output / "execution.json", execution)
+    write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+    log = _Jsonl(output / "train.jsonl")
+    if resume_payload is None:
+        reference = _validate_latent(
+            model, validation_loader, device, len(validation_loader), trainer.forward_model
+        )
+        warning_checks = 0
+        log.write({"event": "initialization_reference", **reference})
+    else:
+        saved_metrics = resume_payload.get("latent_metrics", {})
+        if "reference" not in saved_metrics:
+            raise ValueError("Resume checkpoint lacks the initialization latent reference")
+        reference = saved_metrics["reference"]
+        warning_checks = int(saved_metrics.get("consecutive_warning_checks", 0))
+    maximum = config["phase1"]["max_successful_updates"]
+    checkpoint_every = config["runtime"]["checkpoint_every_updates"]
+    while trainer.successful_updates < maximum:
+        metrics = trainer.step(next(batches))
+        log.write(metrics)
+        if metrics.get("skipped"):
+            raise FloatingPointError(f"Phase-1 update skipped: {metrics}")
+        update = trainer.successful_updates
+        if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
+            print(f"phase1 update={update} loss={metrics['loss']:.6f} jepa={metrics['jepa']:.6f}")
+        if update % checkpoint_every == 0 or update == maximum:
+            validation = _validate_latent(
+                model, validation_loader, device, len(validation_loader), trainer.forward_model
+            )
+            passed, gate_reasons = _latent_gate(reference, validation, config["monitor"])
+            warning_checks = 0 if passed else warning_checks + 1
+            gate_status = "PASS" if passed else (
+                "FAIL" if warning_checks >= config["monitor"]["consecutive_warning_checks"] else "WARN"
+            )
+            log.write(
+                {
+                    "successful_updates": update,
+                    "latent_gate_status": gate_status,
+                    "latent_gate_reasons": gate_reasons,
+                    **validation,
+                }
+            )
+            atomic_torch_save(
+                trainer.checkpoint_payload(
+                    serializable_config(config),
+                    latent_gate_status=gate_status,
+                    latent_metrics={
+                        "reference": reference,
+                        "current": validation,
+                        "gate_reasons": gate_reasons,
+                        "consecutive_warning_checks": warning_checks,
+                    },
+                ),
+                output / "last.pt",
+            )
+            if gate_status == "FAIL":
+                plot_training(output)
+                raise RuntimeError(
+                    "Latent diversity/scale gate failed on consecutive checks; inspect phase1/train.jsonl"
+                )
+    plot_training(output)
+    print(f"Saved phase-1 checkpoint and training_curves.png: {output}")
+
+
+def _load_phase1_for_phase2(
+    config: dict[str, Any], manifest: dict[str, Any], checkpoint: str, device: torch.device
+) -> tuple[LatentPretrainingModel, dict[str, Any]]:
+    payload = load_checkpoint(checkpoint, device)
+    require_phase1_checkpoint(payload)
+    if payload["metadata"].get("configuration_hash") != configuration_hash(config, "phase1"):
+        raise ValueError("Current config does not match the phase-1 training contract")
+    if payload["metadata"].get("latent_gate_status") != "PASS":
+        raise ValueError(
+            "Phase-1 checkpoint has not passed latent diversity/scale gates; phase 2 is blocked"
+        )
+    if payload["successful_updates"] != config["phase1"]["max_successful_updates"]:
+        raise ValueError("Complete the configured phase-1 update budget before phase 2")
+    if payload["metadata"].get("manifest_hash") != manifest["meta"]["manifest_hash"]:
+        raise ValueError("Phase-1 checkpoint and current manifest hashes differ")
+    model = build_phase1_model(config, build_normalizer(manifest["meta"])).to(device)
+    expected_normalizer_hash = state_dict_hash(model.normalizer)
+    model.load_state_dict(payload["model"], strict=True)
+    if state_dict_hash(model.backbone) != payload["metadata"]["backbone_hash"]:
+        raise ValueError("Loaded backbone hash differs from phase-1 checkpoint metadata")
+    if state_dict_hash(model.normalizer) != expected_normalizer_hash:
+        raise ValueError("Phase-1 normalizer does not match current train statistics")
+    return model, payload
+
+
+def command_train_phase2(args: argparse.Namespace) -> None:
+    config = load_config(_config_path(args.config))
+    manifest, _ = _manifest(config, args.manifest)
+    checkpoint = args.backbone_checkpoint or config["phase2"].get("backbone_checkpoint")
+    if not checkpoint:
+        raise ValueError("Pass --backbone-checkpoint from a completed v3 phase 1")
+    device = resolve_device(args.device or config["runtime"]["device"])
+    execution = _configure_execution(config, args, device)
+    phase1_model, parent_payload = _load_phase1_for_phase2(config, manifest, checkpoint, device)
+    seed_everything(config["phase2"]["decoder_initialization_seed"])
+    system = RestorationSystem(
+        phase1_model.backbone, phase1_model.normalizer, build_decoders(config)
+    )
+    del phase1_model, parent_payload
+    trainer = Phase2Trainer(
+        system, config, device, str(Path(checkpoint).resolve()), manifest["meta"]["manifest_hash"]
+    )
+    best_validation = math.inf
+    if args.resume:
+        payload = load_checkpoint(args.resume, device)
+        if payload.get("metadata", {}).get("phase") != "latent_decoder_train":
+            raise ValueError("Resume checkpoint is not a phase-2 checkpoint")
+        if payload["metadata"].get("configuration_hash") != configuration_hash(config, "phase2"):
+            raise ValueError("Phase-2 resume config changes training semantics")
+        if payload["metadata"].get("manifest_hash") != manifest["meta"]["manifest_hash"]:
+            raise ValueError("Phase-2 resume manifest differs from training data")
+        if payload["metadata"].get("frozen_backbone_hash") != trainer.frozen_backbone_hash:
+            raise ValueError("Phase-2 resume checkpoint has a different phase-1 parent")
+        system.load_state_dict(payload["system"], strict=True)
+        trainer.assert_backbone_frozen()
+        trainer.decoder_initialization_hash = payload["metadata"]["decoder_initialization_hash"]
+        trainer.optimizer.load_state_dict(payload["optimizer"])
+        trainer.successful_updates = int(payload["successful_updates"])
+        expected_microbatches = trainer.successful_updates * config["phase2"]["gradient_accumulation"]
+        if payload["metadata"].get("data_microbatches_consumed") != expected_microbatches:
+            raise ValueError("Phase-2 resume checkpoint has inconsistent data progress")
+        restore_rng_state(payload["rng"])
+        best_validation = float(payload.get("best_joint_validation_score", math.inf))
+
+    train_dataset = _dataset(config, manifest, "train", fixed_realization=False)
+    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    _fixed_validation_bank(validation_dataset, config["runtime"]["validation_batches"] * config["phase2"]["batch_size"])
+    validation_loader = _loader(config, validation_dataset, config["phase2"]["batch_size"], train=False)
+    batches = _training_batch_stream(
+        config,
+        train_dataset,
+        config["phase2"]["batch_size"],
+        start_microbatch=trainer.successful_updates * config["phase2"]["gradient_accumulation"],
+        namespace="phase2",
+    )
+    output = Path(args.output or config["runtime"]["output_dir"]) / "phase2"
+    _prepare_run(output, args.resume, trainer.successful_updates)
+    _write_resolved(config, output)
+    write_json(output / "execution.json", execution)
+    write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+    log = _Jsonl(output / "train.jsonl")
+    maximum = config["phase2"]["max_successful_updates"]
+    checkpoint_every = config["runtime"]["checkpoint_every_updates"]
+    if args.resume and math.isfinite(best_validation) and not (output / "best_joint_validation.pt").exists():
+        prior_best = Path(args.resume).parent / "best_joint_validation.pt"
+        if not prior_best.exists():
+            raise ValueError("Resume needs best_joint_validation.pt beside last.pt; copy the complete phase2 folder")
+        import shutil
+        shutil.copy2(prior_best, output / "best_joint_validation.pt")
+    while trainer.successful_updates < maximum:
+        group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
+        metrics = trainer.step(group)
+        log.write(metrics)
+        if metrics.get("skipped"):
+            raise FloatingPointError(f"Phase-2 update skipped: {metrics}")
+        update = trainer.successful_updates
+        if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
+            print(f"phase2 update={update} loss={metrics['loss']:.6f}")
+        if update % checkpoint_every == 0 or update == maximum:
+            trainer.assert_backbone_frozen()
+            evaluation = _evaluate_with_overlap(
+                system,
+                validation_loader,
+                validation_dataset,
+                device,
+                config["runtime"]["validation_batches"],
+                config["phase2"]["smooth_l1_beta"],
+                forward_model=trainer.forward_model,
+            )
+            validation = {f"validation_{key}": value for key, value in evaluation.items()}
+            log.write({"successful_updates": update, **validation})
+            payload = trainer.checkpoint_payload(serializable_config(config))
+            improved = validation["validation_joint_validation_score"] < best_validation
+            if improved:
+                best_validation = float(validation["validation_joint_validation_score"])
+            payload["best_joint_validation_score"] = best_validation
+            payload["validation_metrics"] = validation
+            if improved:
+                atomic_torch_save(payload, output / "best_joint_validation.pt")
+            atomic_torch_save(payload, output / "last.pt")
+    plot_training(output)
+    print(f"Saved phase-2 checkpoints and training_curves.png: {output}")
+
+
+def _system_from_phase2(checkpoint: str, device: torch.device) -> tuple[RestorationSystem, dict[str, Any]]:
+    payload = load_checkpoint(checkpoint, device)
+    metadata = payload.get("metadata", {})
+    if metadata.get("pipeline_version") != 3 or metadata.get("phase") != "latent_decoder_train":
+        raise ValueError("Checkpoint is not a QWT-JEPA v3 phase-2 checkpoint")
+    config = payload["config"]
+    if metadata.get("configuration_hash") != configuration_hash(config, "phase2"):
+        raise ValueError("Phase-2 checkpoint config hash mismatch")
+    backbone = build_backbone(config)
+    system = RestorationSystem(backbone, ImuNormalizer(), build_decoders(config)).to(device)
+    system.load_state_dict(payload["system"], strict=True)
+    system.freeze_backbone()
+    if state_dict_hash(system.backbone) != metadata["frozen_backbone_hash"]:
+        raise ValueError("Phase-2 frozen backbone hash mismatch")
+    if state_dict_hash(system.normalizer) != metadata["frozen_normalizer_hash"]:
+        raise ValueError("Phase-2 frozen normalizer hash mismatch")
+    if state_dict_hash(system.decoders) != metadata["decoder_current_hash"]:
+        raise ValueError("Phase-2 decoder hash mismatch")
+    system.eval()
+    return system, config
+
+
+def command_evaluate(args: argparse.Namespace) -> None:
+    if args.max_batches is not None and args.max_batches < 1:
+        raise ValueError("--max-batches must be positive; omit it for the full split")
+    if args.panels < 0:
+        raise ValueError("--panels cannot be negative")
+    device = resolve_device(args.device or "auto")
+    system, config = _system_from_phase2(args.checkpoint, device)
+    execution = _configure_execution(config, args, device, use_saved_setting=False)
+    runner, _ = parallel_forward(RestorationForward(system), device, config["runtime"]["gpu_count"])
+    manifest, _ = _manifest(config, args.manifest)
+    if args.protocol:
+        scenarios = {
+            "clean_clean": ("clean", "clean"),
+            "noisy_image_clean_imu": ("full", "clean"),
+            "clean_image_noisy_imu": ("clean", "full"),
+            "noisy_noisy": ("full", "full"),
+            "low_light_only": ("low_light_only", "clean"),
+            "blur_only": ("blur_only", "clean"),
+            "sensor_noise_only": ("sensor_noise_only", "clean"),
+            "imu_white_noise_only": ("clean", "white_noise_only"),
+            "imu_bias_only": ("clean", "bias_only"),
+            "imu_bandwidth_only": ("clean", "bandwidth_only"),
+        }
+    else:
+        scenarios = {"requested": (args.image_mode, args.imu_mode)}
+    results = {}
+    output = Path(args.output or Path(args.checkpoint).parent / f"evaluation_{args.split}")
+    if (output / "metrics.json").exists():
+        raise ValueError(f"Evaluation output already exists: {output}; choose a new --output")
+    write_json(output / "evaluation_config.json", {
+        "checkpoint": str(Path(args.checkpoint).resolve()), "split": args.split,
+        "manifest_hash": manifest["meta"]["manifest_hash"], "config": serializable_config(config),
+        "scenarios": scenarios, "max_batches": args.max_batches,
+        "validation_realization": config["data"]["validation_realization"],
+        "evaluation_clean_probability": 0.0,
+        "execution": execution,
+    })
+    for name, (image_mode, imu_mode) in scenarios.items():
+        dataset = _dataset(
+            config,
+            manifest,
+            args.split,
+            fixed_realization=True,
+            image_mode=image_mode,
+            imu_mode=imu_mode,
+        )
+        loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
+        results[name] = _evaluate_with_overlap(
+            system,
+            loader,
+            dataset,
+            device,
+            args.max_batches or len(loader),
+            config["phase2"]["smooth_l1_beta"],
+            output=output / name, panels=args.panels,
+            label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {name}",
+            forward_model=runner,
+        )
+    scope = f"max-batches={args.max_batches}" if args.max_batches else "full split"
+    evaluation_summary(output, results, label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {scope}")
+    print(json.dumps(results, indent=2))
+    print(f"Saved metrics, panels, IMU arrays and comparison.png to {output}")
+
+
+def _read_imu_csv(path: str, length: int) -> tuple[np.ndarray, np.ndarray | None]:
+    first = Path(path).read_text(encoding="utf-8").splitlines()[0].lstrip("# ").strip()
+    headers = {"ax,ay,az,gx,gy,gz", "timestamp,ax,ay,az,gx,gy,gz"}
+    values = np.loadtxt(path, delimiter=",", ndmin=2, skiprows=int(first in headers))
+    if not np.isfinite(values).all():
+        raise ValueError("IMU CSV contains NaN/Inf")
+    if values.shape == (length, 6):
+        return values.astype(np.float32), None
+    if values.shape == (length, 7):
+        return values[:, 1:].astype(np.float32), values[:, 0].astype(np.float64)
+    raise ValueError(f"Expected IMU CSV [{length},6] or [{length},7], got {values.shape}")
+
+
+def command_infer(args: argparse.Namespace) -> None:
+    device = resolve_device(args.device or "auto")
+    system, config = _system_from_phase2(args.checkpoint, device)
+    image = load_rgb(args.image, tuple(config["data"]["image_size"]))
+    imu, timestamps = _read_imu_csv(args.imu, config["data"]["imu_window"])
+    if timestamps is None:
+        timestamps = np.arange(len(imu), dtype=np.float64) * args.imu_dt
+    image_time = args.image_time if args.image_time is not None else 0.5 * (timestamps[0] + timestamps[-1])
+    image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).unsqueeze(0).float().to(device)
+    imu_tensor = torch.from_numpy(imu.T).unsqueeze(0).float().to(device)
+    with torch.no_grad():
+        restored = system(
+            image_tensor,
+            imu_tensor,
+            torch.tensor([image_time], dtype=torch.float64, device=device),
+            torch.from_numpy(timestamps).unsqueeze(0).to(device),
+        )
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    image_out = restored.image[0].clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+    Image.fromarray(np.uint8(image_out * 255.0), mode="RGB").save(output / "image_restored.png")
+    imu_out = restored.imu_physical[0].transpose(0, 1).cpu().numpy()
+    np.savetxt(
+        output / "imu_restored.csv",
+        np.column_stack((timestamps, imu_out)),
+        delimiter=",",
+        header="timestamp,ax,ay,az,gx,gy,gz",
+        comments="",
+    )
+    (output / "metadata.json").write_text(
+        json.dumps({"checkpoint": str(Path(args.checkpoint).resolve()), "image_time": image_time}, indent=2),
+        encoding="utf-8",
+    )
+    print(f"Saved restored image and IMU to {output}")
+
+
+def command_preview_corruption(args: argparse.Namespace) -> None:
+    config = load_config(_config_path(args.config))
+    image_corruptor, _ = build_corruptors(config)
+    clean = load_rgb(args.image, tuple(config["data"]["image_size"]))
+    noisy, parameters = image_corruptor(
+        clean,
+        split="preview",
+        realization=args.realization,
+        trajectory="preview",
+        timestamp=0.0,
+        frame_index=0,
+        mode=args.mode,
+    )
+    panel = np.concatenate((clean, noisy, np.abs(clean - noisy)), axis=1)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.uint8(np.clip(panel, 0, 1) * 255.0), mode="RGB").save(output)
+    output.with_suffix(".json").write_text(json.dumps(parameters, indent=2), encoding="utf-8")
+    print(f"Saved clean | corrupted | absolute error panel to {output}")
+
+
+def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
+    batch_size = config["phase1"]["batch_size"]
+    height, width = config["data"]["image_size"]
+    length = config["data"]["imu_window"]
+    yy, xx = np.mgrid[0:height, 0:width]
+    image_corruptor, imu_corruptor = build_corruptors(config)
+    clean_images, noisy_images, clean_imus, noisy_imus = [], [], [], []
+    timestamps = np.arange(length, dtype=np.float64) * 0.01
+    for sample in range(batch_size):
+        clean = np.stack(
+            (
+                (xx + sample) / max(1, width + batch_size - 1),
+                (yy + 2 * sample) / max(1, height + 2 * batch_size - 1),
+                0.5 + 0.25 * np.sin((xx + yy + sample) / 4.0),
+            ),
+            axis=-1,
+        ).clip(0, 1).astype(np.float32)
+        time = timestamps
+        imu_clean = np.stack(
+            [np.sin(time * (axis + 1) + sample * 0.2) for axis in range(6)], axis=-1
+        ).astype(np.float32)
+        noisy_image, _ = image_corruptor(
+            clean,
+            split="smoke",
+            realization=0,
+            trajectory=f"synthetic/{sample}",
+            timestamp=float(time.mean()),
+            frame_index=sample,
+        )
+        noisy_imu, _ = imu_corruptor.window(
+            imu_clean,
+            time,
+            0,
+            length,
+            split="smoke",
+            realization=0,
+            trajectory=f"synthetic/{sample}",
+        )
+        clean_images.append(torch.from_numpy(clean.transpose(2, 0, 1)))
+        noisy_images.append(torch.from_numpy(noisy_image.transpose(2, 0, 1)))
+        clean_imus.append(torch.from_numpy(imu_clean.T))
+        noisy_imus.append(torch.from_numpy(noisy_imu.T))
+    return {
+        "image_clean": torch.stack(clean_images).float(),
+        "image_noisy": torch.stack(noisy_images).float(),
+        "imu_clean_phys": torch.stack(clean_imus).float(),
+        "imu_noisy_phys": torch.stack(noisy_imus).float(),
+        "image_time": torch.full((batch_size,), float(timestamps.mean())),
+        "imu_times": torch.from_numpy(timestamps).float().repeat(batch_size, 1),
+        "sample_id": [f"synthetic-{index}" for index in range(batch_size)],
+    }
+
+
+def command_smoke(args: argparse.Namespace) -> None:
+    config = load_config(_config_path(args.config or "configs/smoke.yaml"))
+    device = resolve_device(args.device or config["runtime"]["device"])
+    _configure_execution(config, args, device)
+    seed_everything(config["phase1"]["initialization_seed"])
+    batch = _synthetic_batch(config)
+    model = build_phase1_model(config, ImuNormalizer())
+    qwt_input = batch["image_clean"][:1].to(device)
+    coeff, layout = model.backbone.image_transform.to(device).analysis(qwt_input)
+    qwt_error = float((model.backbone.image_transform.synthesis(coeff, layout) - qwt_input).abs().max())
+    trainer1 = Phase1Trainer(model, config, device, "synthetic")
+    phase1_metrics = trainer1.step(batch)
+    seed_everything(config["phase2"]["decoder_initialization_seed"])
+    system = RestorationSystem(model.backbone, model.normalizer, build_decoders(config))
+    trainer2 = Phase2Trainer(system, config, device, "synthetic-phase1", "synthetic")
+    phase2_batch = {key: value[:1] if isinstance(value, torch.Tensor) else value[:1] for key, value in batch.items()}
+    phase2_metrics = trainer2.step([phase2_batch])
+    trainer2.assert_backbone_frozen()
+    result = {
+        "qwt_roundtrip_max_abs_error": qwt_error,
+        "phase1": phase1_metrics,
+        "phase2": phase2_metrics,
+        "phase1_has_decoder_attribute": hasattr(model, "decoder"),
+        "backbone_frozen_after_phase2": True,
+    }
+    output = Path(args.output or config["runtime"]["output_dir"])
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "smoke.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    manifest = subparsers.add_parser("build-manifest", help="Audit and pair a TartanAir dataset")
+    manifest.add_argument("--config")
+    manifest.add_argument("--data-root")
+    manifest.add_argument("--output", required=True)
+    manifest.set_defaults(function=command_build_manifest)
+
+    phase1 = subparsers.add_parser("train-phase1", help="Train latent JEPA without a decoder")
+    phase1.add_argument("--config")
+    phase1.add_argument("--manifest")
+    phase1.add_argument("--output")
+    phase1.add_argument("--device")
+    phase1.add_argument("--gpus", choices=("auto", "1", "2"), help="Override runtime.gpu_count; batch_size remains global")
+    phase1.add_argument("--resume")
+    phase1.set_defaults(function=command_train_phase1)
+
+    phase2 = subparsers.add_parser("train-phase2", help="Freeze backbone and train latent-only decoders")
+    phase2.add_argument("--config")
+    phase2.add_argument("--manifest")
+    phase2.add_argument("--backbone-checkpoint")
+    phase2.add_argument("--output")
+    phase2.add_argument("--device")
+    phase2.add_argument("--gpus", choices=("auto", "1", "2"), help="Override runtime.gpu_count; batch_size remains global")
+    phase2.add_argument("--resume")
+    phase2.set_defaults(function=command_train_phase2)
+
+    evaluate = subparsers.add_parser("evaluate", help="Evaluate a completed phase-2 checkpoint")
+    evaluate.add_argument("--checkpoint", required=True)
+    evaluate.add_argument("--manifest")
+    evaluate.add_argument("--split", choices=("valid", "test"), default="test")
+    evaluate.add_argument("--max-batches", type=int)
+    evaluate.add_argument("--device")
+    evaluate.add_argument("--gpus", choices=("auto", "1", "2"), default="auto")
+    evaluate.add_argument("--output", help="Directory for metrics, image/IMU panels and merged arrays")
+    evaluate.add_argument("--panels", type=int, default=6, help="Image panels and IMU trajectory plots per scenario")
+    evaluate.add_argument("--protocol", action="store_true", help="Evaluate all clean/noise/blur groups")
+    evaluate.add_argument(
+        "--image-mode",
+        choices=("full", "clean", "low_light_only", "blur_only", "sensor_noise_only"),
+        default="full",
+    )
+    evaluate.add_argument(
+        "--imu-mode",
+        choices=("full", "clean", "white_noise_only", "bias_only", "bandwidth_only"),
+        default="full",
+    )
+    evaluate.set_defaults(function=command_evaluate)
+
+    infer = subparsers.add_parser("infer", help="Restore one image and one IMU window")
+    infer.add_argument("--checkpoint", required=True)
+    infer.add_argument("--image", required=True)
+    infer.add_argument("--imu", required=True)
+    infer.add_argument("--output", required=True)
+    infer.add_argument("--image-time", type=float)
+    infer.add_argument("--imu-dt", type=float, default=0.01)
+    infer.add_argument("--device")
+    infer.set_defaults(function=command_infer)
+
+    preview = subparsers.add_parser("preview-corruption", help="Preview low-light camera degradation")
+    preview.add_argument("--config")
+    preview.add_argument("--image", required=True)
+    preview.add_argument("--output", required=True)
+    preview.add_argument("--mode", choices=("full", "clean", "low_light_only", "blur_only", "sensor_noise_only"), default="full")
+    preview.add_argument("--realization", type=int, default=0)
+    preview.set_defaults(function=command_preview_corruption)
+
+    smoke = subparsers.add_parser("smoke", help="Run one synthetic update in each phase")
+    smoke.add_argument("--config")
+    smoke.add_argument("--output")
+    smoke.add_argument("--device")
+    smoke.add_argument("--gpus", choices=("auto", "1", "2"))
+    smoke.set_defaults(function=command_smoke)
+    plots = subparsers.add_parser("plot-training", help="Generate PNG curves and CSV summaries from JSONL logs")
+    plots.add_argument("--run-dir", required=True)
+    plots.set_defaults(function=lambda args: print("\n".join(str(path) for path in plot_training(args.run_dir))))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.function(args)
+    except (ValueError, FileNotFoundError, RuntimeError) as error:
+        parser.error(str(error))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

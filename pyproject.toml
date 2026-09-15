@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwt-jepa-v3"
+version = "3.0.0"
+description = "Two-phase latent-first QWT-JEPA restoration for low-light RGB and IMU"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10",
+  "PyYAML>=6",
+  "scipy>=1.11",
+  "torch>=2.2",
+  "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+qwt-jepa-v3 = "qjepa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["qjepa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
