@@ -25,8 +25,8 @@ class ImuCorruptionConfig:
     scale_error_std: float = 0.006
     cross_axis_std: float = 0.003
     lowpass_sigma_samples: tuple[float, float] = (0.0, 2.5)
-    noise_gain_drift: tuple[float, float] = (0.4, 2.2)
-    noise_drift_seconds: float = 3.0
+    noise_gain_drift: tuple[float, float] = (0.25, 4.0)
+    noise_drift_seconds: float = 1.5
     quantization_step_accel: tuple[float, float] = (0.0, 0.008)
     quantization_step_gyro: tuple[float, float] = (0.0, 0.0004)
     vibration_tones: tuple[int, int] = (0, 3)

@@ -73,8 +73,8 @@ corruption:
     scale_error_std: 0.006
     cross_axis_std: 0.003
     lowpass_sigma_samples: [0.0, 2.5]
-    noise_gain_drift: [0.4, 2.2]
-    noise_drift_seconds: 3.0
+    noise_gain_drift: [0.25, 4.0]
+    noise_drift_seconds: 1.5
     quantization_step_accel: [0.0, 0.008]
     quantization_step_gyro: [0.0, 0.0004]
     vibration_tones: [0, 3]
