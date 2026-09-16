@@ -27,6 +27,11 @@ class ImuCorruptionConfig:
     lowpass_sigma_samples: tuple[float, float] = (0.0, 2.5)
     quantization_step_accel: tuple[float, float] = (0.0, 0.008)
     quantization_step_gyro: tuple[float, float] = (0.0, 0.0004)
+    vibration_tones: tuple[int, int] = (0, 3)
+    vibration_frequency_hz: tuple[float, float] = (8.0, 45.0)
+    vibration_modulation_hz: tuple[float, float] = (0.2, 1.5)
+    accel_vibration_amplitude: tuple[float, float] = (0.0, 0.35)
+    gyro_vibration_amplitude: tuple[float, float] = (0.0, 0.02)
     spike_rate_hz: float = 0.6
     accel_spike_amplitude: tuple[float, float] = (0.25, 2.5)
     gyro_spike_amplitude: tuple[float, float] = (0.01, 0.15)
@@ -127,6 +132,27 @@ class TrajectoryImuCorruptor:
         if mode == "full":
             median_dt = float(np.median(np.diff(timestamps)))
             duration = float(timestamps[-1] - timestamps[0])
+
+            # Rung co hoc: vai tone bang hep, bien do bien thien cham -> khong dung.
+            elapsed = timestamps - timestamps[0]
+            ceiling = 0.45 / median_dt  # giu duoi Nyquist cho moi tan so lay mau
+            tones: list[dict[str, object]] = []
+            for _ in range(int(rng.integers(cfg.vibration_tones[0], cfg.vibration_tones[1] + 1))):
+                frequency = min(float(rng.uniform(*cfg.vibration_frequency_hz)), ceiling)
+                amplitude = np.r_[
+                    [rng.uniform(*cfg.accel_vibration_amplitude)] * 3,
+                    [rng.uniform(*cfg.gyro_vibration_amplitude)] * 3,
+                ] * rng.uniform(0.4, 1.0, 6)
+                phase = rng.uniform(0.0, 2.0 * np.pi, 6)
+                envelope = 0.6 + 0.4 * np.sin(
+                    2.0 * np.pi * float(rng.uniform(*cfg.vibration_modulation_hz)) * elapsed
+                    + float(rng.uniform(0.0, 2.0 * np.pi))
+                )
+                carrier = np.sin(2.0 * np.pi * frequency * elapsed[:, None] + phase[None, :])
+                out += carrier * envelope[:, None] * amplitude[None, :]
+                tones.append({"frequency_hz": frequency, "amplitude": amplitude.tolist()})
+            parameters["vibration_tones"] = tones
+
             for group, amplitude in ((slice(0, 3), cfg.accel_spike_amplitude), (slice(3, 6), cfg.gyro_spike_amplitude)):
                 count = int(rng.poisson(cfg.spike_rate_hz * duration))
                 for _ in range(count):

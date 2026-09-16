@@ -75,6 +75,11 @@ corruption:
     lowpass_sigma_samples: [0.0, 2.5]
     quantization_step_accel: [0.0, 0.008]
     quantization_step_gyro: [0.0, 0.0004]
+    vibration_tones: [0, 3]
+    vibration_frequency_hz: [8.0, 45.0]
+    vibration_modulation_hz: [0.2, 1.5]
+    accel_vibration_amplitude: [0.0, 0.35]
+    gyro_vibration_amplitude: [0.0, 0.02]
     spike_rate_hz: 0.6
     accel_spike_amplitude: [0.25, 2.5]
     gyro_spike_amplitude: [0.01, 0.15]

@@ -290,39 +290,91 @@ vấn đề. Không nới ngưỡng pairing chỉ để đủ số lượng mẫ
 
 ## Cell 6 — Xem ảnh tối/mờ/nhiễu và IMU bị làm xấu
 
+Cell này lấy mẫu **ngẫu nhiên mỗi lần chạy**: `default_rng()` không seed, và
+`set_realization` bốc một realization mới nên cùng một frame cũng ra corruption
+khác. Chạy lại vài lần để thấy phổ mức nhiễu thay vì một mẫu cố định.
+
+Dùng `fixed_realization=False` để giữ đúng `clean_probability` của config (5%),
+nên thỉnh thoảng sẽ gặp mẫu gần như sạch — đó là dữ liệu model thật sự thấy.
+
 ```python
 import numpy as np
 from qjepa.cli import _dataset
 
-preview_dataset = _dataset(config, manifest, 'valid', fixed_realization=True)
-sample = preview_dataset[len(preview_dataset) // 2]
+CHANNELS = ('ax', 'ay', 'az', 'gx', 'gy', 'gz')
+preview_dataset = _dataset(config, manifest, 'valid', fixed_realization=False)
+rng = np.random.default_rng()                      # khong seed -> moi lan chay khac nhau
+preview_dataset.set_realization(int(rng.integers(1, 10**6)))
+picks = rng.choice(len(preview_dataset), size=6, replace=False)
+samples = [preview_dataset[int(i)] for i in picks]
+print('realization', preview_dataset.realization, '| sample', list(map(int, picks)))
+
+# Luoi 6 mau: hang tren sach, hang duoi da lam xau -> thay ngay do tan mac cua corruption
+fig, axes = plt.subplots(2, 6, figsize=(17, 6))
+for column, sample in enumerate(samples):
+    image = sample['corruption']['image']
+    blur = [name for name, on in (('defocus', image['defocus']), ('motion', image['motion']),
+                                  ('downsample', image['downsample'])) if on]
+    for row, key in enumerate(('image_clean', 'image_noisy')):
+        axes[row, column].imshow(sample[key].permute(1, 2, 0).numpy())
+        axes[row, column].axis('off')
+    axes[0, column].set_title(f"#{int(picks[column])} {sample['trajectory_key']}\nmean {sample['image_clean'].mean():.2f}",
+                              fontsize=8)
+    axes[1, column].set_title(
+        ('CLEAN' if image['clean'] else '+'.join(blur) or 'khong nhoe')
+        + f"\ngain {image['exposure_gain']:.2f} | mean {sample['image_noisy'].mean():.2f}",
+        fontsize=8)
+fig.tight_layout()
+plt.show()
+
+# Mot mau xem ky
+sample = samples[0]
 fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 for ax, name in zip(axes[:2], ('image_clean', 'image_noisy')):
     ax.imshow(sample[name].permute(1, 2, 0).numpy())
     ax.set_title(name)
     ax.axis('off')
-axes[2].imshow((sample['image_clean'] - sample['image_noisy']).abs().mean(0),
-               cmap='magma', vmin=0, vmax=1)
-axes[2].set_title('Mean absolute RGB error [0,1]')
+error = (sample['image_clean'] - sample['image_noisy']).abs().mean(0)
+axes[2].imshow(error, cmap='magma', vmin=0, vmax=float(error.max()))
+axes[2].set_title(f'Mean absolute RGB error (max {error.max():.2f})')
 axes[2].axis('off')
 plt.show()
 
 t = sample['imu_times'].numpy()
 t = t - t[0]
+clean, noisy = sample['imu_clean_phys'].numpy(), sample['imu_noisy_phys'].numpy()
 fig, axes = plt.subplots(3, 2, figsize=(13, 9), sharex=True)
 for channel, ax in enumerate(axes.T.flat):
-    ax.plot(t, sample['imu_clean_phys'][:, channel], label='clean')
-    ax.plot(t, sample['imu_noisy_phys'][:, channel], alpha=0.7, label='corrupted')
-    ax.set(title=('ax', 'ay', 'az', 'gx', 'gy', 'gz')[channel],
-           ylabel='m/s²' if channel < 3 else 'rad/s', xlabel='Time (s)')
+    ax.plot(t, clean[:, channel], label='clean')
+    ax.plot(t, noisy[:, channel], alpha=0.7, label='corrupted')
+    ax.set(title=CHANNELS[channel], ylabel='m/s²' if channel < 3 else 'rad/s', xlabel='Time (s)')
     ax.legend()
 fig.tight_layout()
 plt.show()
+
+# Pho cua phan bi them vao: rung bang hep hien thanh dinh, white noise thanh nen phang
+residual = noisy - clean
+freq = np.fft.rfftfreq(len(t), float(np.median(np.diff(t))))
+fig, ax = plt.subplots(figsize=(13, 3.5))
+for channel in range(6):
+    ax.semilogy(freq, np.abs(np.fft.rfft(residual[:, channel])) + 1e-9,
+                label=CHANNELS[channel], alpha=0.8)
+ax.set(title='Pho nhieu IMU them vao (corrupted - clean)', xlabel='Hz', ylabel='|FFT|')
+ax.legend(ncol=6, fontsize=8)
+fig.tight_layout()
+plt.show()
+
+above5 = (np.abs(np.fft.rfft(residual, axis=0))[freq > 5] ** 2).sum()
+print(f"Nang luong nhieu tren 5 Hz: {100 * above5 / (np.abs(np.fft.rfft(residual, axis=0)) ** 2).sum():.0f}%")
 print(json.dumps(sample['corruption'], indent=2))
 ```
 
 Đây là preview corruption, chưa phải output model. Chỉnh corruption ở cell 4
 theo dữ liệu camera thực trước khi bắt đầu run, rồi chạy lại từ cell 4.
+
+Mỗi lần chạy lại cell này cho một realization khác nên kết quả **không** tái lập
+được — đó là chủ ý, để thấy phân bố. Train và eval vẫn dùng
+`validation_realization` cố định trong config, không bị cell này ảnh hưởng.
 
 ## Cell 7 — Đo một update phase 1 trên GPU với shape thật
 

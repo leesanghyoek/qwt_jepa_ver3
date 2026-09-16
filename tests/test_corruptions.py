@@ -60,3 +60,47 @@ def test_imu_overlaps_share_the_exact_same_corruption_trace():
     )
     assert np.array_equal(first, repeated)
 
+
+def test_imu_vibration_adds_narrowband_tones_below_nyquist():
+    rate, count = 100.0, 1024
+    times = np.arange(count, dtype=np.float64) / rate
+    clean = np.zeros((count, 6))
+    config = ImuCorruptionConfig(
+        clean_probability=0.0,
+        accel_white_noise_std=(0.0, 0.0),
+        gyro_white_noise_std=(0.0, 0.0),
+        accel_bias_random_walk=0.0,
+        gyro_bias_random_walk=0.0,
+        spike_rate_hz=0.0,
+        dropout_rate_hz=0.0,
+        quantization_step_accel=(0.0, 0.0),
+        quantization_step_gyro=(0.0, 0.0),
+        vibration_tones=(2, 2),
+        accel_vibration_amplitude=(0.2, 0.2),
+    )
+    corrupted, parameters = TrajectoryImuCorruptor(config, master_seed=5).trajectory(
+        clean, times, split="train", realization=0, trajectory="T", mode="full"
+    )
+    tones = parameters["vibration_tones"]
+    assert len(tones) == 2
+    frequencies = np.fft.rfftfreq(count, 1.0 / rate)
+    spectrum = np.abs(np.fft.rfft(corrupted[:, 0] - corrupted[:, 0].mean()))
+    for tone in tones:
+        assert tone["frequency_hz"] < rate / 2.0
+        nearest = int(np.argmin(np.abs(frequencies - tone["frequency_hz"])))
+        # Mot tone bang hep phai troi han nen pho quanh no.
+        assert spectrum[nearest] > 20 * np.median(spectrum)
+
+
+def test_imu_vibration_frequency_is_clamped_for_slow_sampling():
+    rate, count = 40.0, 512      # Nyquist 20 Hz, duoi day tan so cau hinh
+    times = np.arange(count, dtype=np.float64) / rate
+    clean = np.zeros((count, 6))
+    config = ImuCorruptionConfig(
+        clean_probability=0.0, vibration_tones=(3, 3), vibration_frequency_hz=(30.0, 45.0)
+    )
+    _, parameters = TrajectoryImuCorruptor(config, master_seed=5).trajectory(
+        clean, times, split="train", realization=0, trajectory="T", mode="full"
+    )
+    assert parameters["vibration_tones"]
+    assert all(tone["frequency_hz"] <= 0.45 * rate for tone in parameters["vibration_tones"])
