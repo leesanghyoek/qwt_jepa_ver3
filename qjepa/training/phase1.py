@@ -10,7 +10,12 @@ import torch
 from ..models.pipeline import LatentPretrainingModel
 from ..execution import Phase1Forward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
-from .losses import dense_positions, jepa_latent_loss, variance_covariance_loss
+from .losses import (
+    dense_positions,
+    jepa_latent_loss,
+    phase1_reconstruction_loss,
+    variance_covariance_loss,
+)
 from .schedules import ema_momentum, warmup_cosine_lr
 from .sensitivity import (
     encoder_sensitivity_loss,
@@ -50,6 +55,11 @@ class Phase1Trainer:
         "covariance",
         "encoder_sensitivity",
         "encoder_sensitivity_weight",
+        "reconstruction",
+        "reconstruction_image",
+        "reconstruction_image_detail",
+        "reconstruction_imu",
+        "reconstruction_imu_detail",
     }
 
     def __init__(
@@ -68,6 +78,7 @@ class Phase1Trainer:
             Phase1Forward(self.model), device, config["runtime"].get("gpu_count", "auto")
         )
         self.manifest_hash = manifest_hash
+        self.decoder_forward_calls = 0
         self.successful_updates = 0
         self.parameters = list(model.online_parameters())
         teacher_ids = {id(parameter) for parameter in model.teachers.parameters()}
@@ -174,6 +185,21 @@ class Phase1Trainer:
         variance = torch.stack([item[0] for item in regularizers]).mean()
         covariance = torch.stack([item[1] for item in regularizers]).mean()
 
+        reconstruction = jepa.new_zeros(())
+        reconstruction_parts: dict[str, float] = {}
+        reconstruction_weight = float(self.phase.get("coefficient_reconstruction_loss_weight", 0.0))
+        if reconstruction_weight > 0:
+            reconstruction, parts = phase1_reconstruction_loss(
+                features["reconstruction_image"],
+                features["reconstruction_image_target"],
+                features["reconstruction_imu"],
+                features["reconstruction_imu_target"],
+                detail_weight=float(self.phase.get("reconstruction_detail_weight", 0.5)),
+            )
+            reconstruction_parts = {key: float(value.detach()) for key, value in parts.items()}
+            reconstruction_parts["reconstruction"] = float(reconstruction.detach())
+            self.decoder_forward_calls += 1
+
         encoder_term = jepa.new_zeros(())
         gain_mean = 0.0
         if encoder_weight > 0:
@@ -190,6 +216,7 @@ class Phase1Trainer:
             + self.phase["variance_weight"] * variance
             + self.phase["covariance_weight"] * covariance
             + encoder_weight * encoder_term
+            + reconstruction_weight * reconstruction
         )
         if not torch.isfinite(total):
             self.optimizer.zero_grad(set_to_none=True)
@@ -217,6 +244,7 @@ class Phase1Trainer:
             "variance": float(variance.detach()),
             "covariance": float(covariance.detach()),
             "encoder_sensitivity": float(encoder_term.detach()),
+            **reconstruction_parts,
             "encoder_sensitivity_weight": encoder_weight,
             "encoder_sensitivity_gain": gain_mean,
             "encoder_source": source,
@@ -237,8 +265,8 @@ class Phase1Trainer:
             "metadata": {
                 "pipeline_version": 3,
                 "phase": "latent_pretrain",
-                "trained_with_reconstruction": False,
-                "phase1_decoder_forward_calls": int(self.model.decoder_forward_calls),
+                "trained_with_reconstruction": bool(self.decoder_forward_calls),
+                "phase1_decoder_forward_calls": self.decoder_forward_calls,
                 "successful_updates": self.successful_updates,
                 "data_microbatches_consumed": self.successful_updates,
                 "manifest_hash": self.manifest_hash,

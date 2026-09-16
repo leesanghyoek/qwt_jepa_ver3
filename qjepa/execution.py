@@ -62,6 +62,18 @@ class Phase1Forward(nn.Module):
         for name in ("FI", "FU", "ZI", "ZU"):
             result[name] = getattr(noisy, name)
             result[name + "_clean"] = getattr(clean, name)
+        if self.model.reconstructs:
+            # Giai ma tu latent NHIEU ra he so SACH — dung nhiem vu cua phase 2.
+            image_coefficients, imu_coefficients = self.model.reconstruct(noisy)
+            backbone = self.model.backbone
+            target_image, _ = backbone.image_transform.analysis(image_clean)
+            target_imu, _ = backbone.imu_transform.analysis(
+                self.model.normalizer.normalize(imu_clean_phys)
+            )
+            result["reconstruction_image"] = image_coefficients
+            result["reconstruction_imu"] = imu_coefficients
+            result["reconstruction_image_target"] = target_image
+            result["reconstruction_imu_target"] = target_imu
         if probe is not None:
             if probe_source == "image":
                 result["probe_feature"] = self.model.backbone.encode_image_dense(probe)

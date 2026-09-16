@@ -80,14 +80,20 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in ("validation_batches", "log_every_updates", "checkpoint_every_updates"):
         if config["runtime"].get(key, 0) < 1:
             raise ValueError(f"runtime.{key} must be positive")
-    forbidden_phase1 = {
-        "decoder_enabled": False,
-        "reconstruction_loss_weight": 0.0,
-        "coefficient_reconstruction_loss_weight": 0.0,
-    }
-    for key, required in forbidden_phase1.items():
-        if phase1.get(key) != required:
-            raise ValueError(f"phase1.{key} must be {required!r}")
+    # Phase 1 khong co duong khoi phuc trong khong gian pixel; chi he so.
+    if phase1.get("reconstruction_loss_weight", 0.0) != 0.0:
+        raise ValueError("phase1.reconstruction_loss_weight must be 0.0; use the coefficient weight")
+    coefficient_weight = phase1.get("coefficient_reconstruction_loss_weight", 0.0)
+    if bool(phase1.get("decoder_enabled", False)):
+        if coefficient_weight <= 0:
+            raise ValueError(
+                "phase1.decoder_enabled needs coefficient_reconstruction_loss_weight > 0,"
+                " otherwise the decoder trains without steering the latent"
+            )
+        if not 0.0 <= phase1.get("reconstruction_detail_weight", 0.0):
+            raise ValueError("phase1.reconstruction_detail_weight cannot be negative")
+    elif coefficient_weight != 0.0:
+        raise ValueError("phase1.coefficient_reconstruction_loss_weight needs decoder_enabled")
     if phase1.get("gradient_accumulation", 1) != 1:
         raise ValueError("Phase 1 uses real batch statistics; gradient_accumulation must be 1")
     if not phase1.get("online_clean_forward_for_regularization", False):
@@ -156,10 +162,12 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
 
 
 def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> LatentPretrainingModel:
+    enabled = bool(config["phase1"].get("decoder_enabled", False))
     return LatentPretrainingModel(
         backbone=build_backbone(config),
         normalizer=normalizer,
         predictor_hidden=config["model"]["predictor_hidden_dim"],
+        decoders=build_decoders(config) if enabled else None,
     )
 
 

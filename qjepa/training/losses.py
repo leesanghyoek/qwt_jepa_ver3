@@ -77,3 +77,45 @@ def phase2_reconstruction_loss(
     total = image + 0.5 * (accel + gyro)
     return total, {"image_l1": image, "imu_accel_smooth_l1": accel, "imu_gyro_smooth_l1": gyro}
 
+
+
+def phase1_reconstruction_loss(
+    image_predicted: torch.Tensor,
+    image_target: torch.Tensor,
+    imu_predicted: torch.Tensor,
+    imu_target: torch.Tensor,
+    detail_weight: float = 0.5,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Neo latent vao he so clean that, voi trong so them cho bang chi tiet.
+
+    Day la so hang duy nhat trong phase 1 khong tu quy chieu: JEPA so bieu dien
+    hoc duoc voi teacher EMA cua chinh no, con variance/covariance chi la thong
+    ke cua bieu dien. Khong co so hang nay, ca he co the troi ve mot bieu dien
+    tho ma loss van giam.
+
+    QWT xep he so thanh [mau, bang, thanh phan] roi dep thanh 48 kenh; bang 0 la
+    LL con bang 1..3 la LH/HL/HH, tuc duong net. Haar cho IMU xep approx truoc,
+    detail sau. Ca hai deu duoc can them o phan chi tiet.
+    """
+    if image_predicted.shape != image_target.shape:
+        raise ValueError(f"Image coefficients {tuple(image_predicted.shape)} != {tuple(image_target.shape)}")
+    if imu_predicted.shape != imu_target.shape:
+        raise ValueError(f"IMU coefficients {tuple(imu_predicted.shape)} != {tuple(imu_target.shape)}")
+    batch, channels, height, width = image_predicted.shape
+    if channels % 16:
+        raise ValueError(f"Expected 16 bands*components per colour, got {channels} channels")
+    image = F.l1_loss(image_predicted, image_target)
+    shape = (batch, channels // 16, 4, 4, height, width)
+    image_detail = F.l1_loss(
+        image_predicted.reshape(shape)[:, :, 1:], image_target.reshape(shape)[:, :, 1:]
+    )
+    imu = F.l1_loss(imu_predicted, imu_target)
+    half = imu_predicted.shape[1] // 2
+    imu_detail = F.l1_loss(imu_predicted[:, half:], imu_target[:, half:])
+    total = (image + detail_weight * image_detail) + 0.5 * (imu + detail_weight * imu_detail)
+    return total, {
+        "reconstruction_image": image,
+        "reconstruction_image_detail": image_detail,
+        "reconstruction_imu": imu,
+        "reconstruction_imu_detail": imu_detail,
+    }

@@ -96,12 +96,19 @@ def load_checkpoint(path: str | Path, device: torch.device | str = "cpu") -> dic
 
 def require_phase1_checkpoint(payload: dict[str, Any]) -> None:
     metadata = payload.get("metadata", {})
-    required = {
-        "pipeline_version": 3,
-        "phase": "latent_pretrain",
-        "trained_with_reconstruction": False,
-        "phase1_decoder_forward_calls": 0,
-    }
-    for key, expected in required.items():
+    for key, expected in (("pipeline_version", 3), ("phase", "latent_pretrain")):
         if metadata.get(key) != expected:
             raise ValueError(f"Invalid phase-1 checkpoint metadata {key}={metadata.get(key)!r}")
+    # Decoder phase 1 chi la mo neo cho latent va bi vut sau do; phase 2 van dung
+    # decoder moi tinh. Hai truong nay phai nhat quan de metadata khong noi doi.
+    reconstruction = metadata.get("trained_with_reconstruction")
+    calls = metadata.get("phase1_decoder_forward_calls")
+    if reconstruction is not True and reconstruction is not False:
+        raise ValueError(f"Invalid phase-1 checkpoint metadata trained_with_reconstruction={reconstruction!r}")
+    if not isinstance(calls, int) or calls < 0:
+        raise ValueError(f"Invalid phase-1 checkpoint metadata phase1_decoder_forward_calls={calls!r}")
+    if reconstruction != (calls > 0):
+        raise ValueError(
+            f"Phase-1 metadata disagrees: trained_with_reconstruction={reconstruction}"
+            f" but decoder ran {calls} times"
+        )
