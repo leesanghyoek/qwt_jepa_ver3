@@ -36,9 +36,9 @@ class LowLightImageCorruptionConfig:
     motion_length_px: tuple[int, int] = (3, 17)
     downsample_probability: float = 0.35
     downsample_scale: tuple[float, float] = (0.45, 0.90)
-    photon_count: tuple[float, float] = (25.0, 180.0)
-    read_noise_std: tuple[float, float] = (2.0 / 255.0, 16.0 / 255.0)
-    row_noise_std: tuple[float, float] = (0.0, 4.0 / 255.0)
+    photon_count: tuple[float, float] = (250.0, 1800.0)
+    read_noise_std: tuple[float, float] = (1.0 / 255.0, 5.0 / 255.0)
+    row_noise_std: tuple[float, float] = (0.0, 2.0 / 255.0)
     hot_pixel_probability: tuple[float, float] = (0.0, 8e-4)
     quantization_bits: tuple[int, int] = (6, 8)
     jpeg_probability: float = 0.35
