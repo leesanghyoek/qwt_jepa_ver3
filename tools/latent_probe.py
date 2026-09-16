@@ -19,7 +19,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _loader, _system_from_phase2, _to_device
+from qjepa.config import build_normalizer, build_phase1_model
 from qjepa.data import read_manifest
+from qjepa.training.checkpoints import load_checkpoint
 
 
 def ridge_probe(features: np.ndarray, targets: np.ndarray, ratio: float = 0.7) -> tuple[float, float]:
@@ -55,8 +57,24 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    system, config = _system_from_phase2(args.checkpoint, device)
     manifest = read_manifest(args.manifest)
+    payload = load_checkpoint(args.checkpoint, device)
+    phase = payload.get("metadata", {}).get("phase")
+    if phase == "latent_pretrain":
+        # Do latent ngay sau phase 1: khong can train phase 2 moi biet ket qua.
+        config = payload["config"]
+        model = build_phase1_model(config, build_normalizer(manifest["meta"])).to(device)
+        model.load_state_dict(payload["model"], strict=True)
+        model.eval()
+        system = None
+        encode = model.encode_online
+        normalize = model.normalizer.normalize
+        print("checkpoint: PHASE 1 — chi do latent, khong co decoder de so sanh")
+    else:
+        system, config = _system_from_phase2(args.checkpoint, device)
+        encode = system.encode
+        normalize = system.normalizer.normalize
+        print("checkpoint: PHASE 2 — do ca latent lan decoder da train")
     dataset = _dataset(config, manifest, args.split, fixed_realization=True,
                        image_mode="clean", imu_mode="clean")
     loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
@@ -72,13 +90,14 @@ def main() -> None:
             break
         batch = _to_device(raw, device)
         with torch.no_grad():
-            latent = system.encode(batch["image_noisy"], batch["imu_noisy_phys"],
-                                   batch["image_time"], batch["imu_times"])
-            imu_clean = system.normalizer.normalize(batch["imu_clean_phys"])
-            restored = system.decode(latent)
+            latent = encode(batch["image_noisy"], batch["imu_noisy_phys"],
+                            batch["image_time"], batch["imu_times"])
+            imu_clean = normalize(batch["imu_clean_phys"])
+            restored = system.decode(latent) if system is not None else None
         # Decoder that da train, do tren cung mau -> so sanh thang voi probe.
-        decoded_imu_error += float((restored.imu_normalized - imu_clean).abs().sum())
-        decoded_imu_count += imu_clean.numel()
+        if restored is not None:
+            decoded_imu_error += float((restored.imu_normalized - imu_clean).abs().sum())
+            decoded_imu_count += imu_clean.numel()
 
         imu_features.append(latent.ZU.flatten(1).cpu().numpy())
         imu_targets.append(imu_clean.flatten(1).cpu().numpy())
@@ -103,10 +122,11 @@ def main() -> None:
         cells.append(grid[:, picked].reshape(-1, grid.shape[-1]).cpu().numpy())
         patches.append(tiles[:, picked].reshape(-1, tiles.shape[-1]).cpu().numpy())
 
-        out_tiles = restored.image.clamp(0.0, 1.0).unfold(2, tile_h, tile_h).unfold(3, tile_w, tile_w)
-        out_tiles = out_tiles.permute(0, 2, 3, 1, 4, 5).reshape(count, rows * columns, -1)
-        decoded_image_error += float((out_tiles[:, picked] - tiles[:, picked]).abs().sum())
-        decoded_image_count += out_tiles[:, picked].numel()
+        if restored is not None:
+            out_tiles = restored.image.clamp(0.0, 1.0).unfold(2, tile_h, tile_h).unfold(3, tile_w, tile_w)
+            out_tiles = out_tiles.permute(0, 2, 3, 1, 4, 5).reshape(count, rows * columns, -1)
+            decoded_image_error += float((out_tiles[:, picked] - tiles[:, picked]).abs().sum())
+            decoded_image_count += out_tiles[:, picked].numel()
         seen += count
 
     imu_features = np.concatenate(imu_features).astype(np.float64)
@@ -130,6 +150,8 @@ def main() -> None:
         share = 100.0 * (1.0 - probe / baseline) if baseline > 0 else float("nan")
         print(f"{label} : probe {probe:.4f} | doan trung binh {baseline:.4f} | rut duoc {share:.0f}%")
 
+    if decoded_imu_count == 0:
+        return
     print()
     print("Decoder DA TRAIN, do tren cung mau va cung don vi:")
     for label, total, count, baseline in (
