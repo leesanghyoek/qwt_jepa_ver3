@@ -44,15 +44,15 @@ corruption:
   image:
     clean_probability: 0.02
     segment_seconds: 1.0
-    exposure_gain: [0.18, 0.60]
-    tone_gamma: [0.45, 0.82]
+    exposure_gain: [0.21, 0.63]
+    tone_gamma: [0.46, 0.79]
     white_balance_gain: [0.82, 1.18]
     black_level: [-0.01, 0.01]
     vignette_strength: [0.0, 0.45]
     defocus_probability: 0.68
-    defocus_sigma_px: [0.25, 1.2]
+    defocus_sigma_px: [0.30, 1.45]
     motion_probability: 0.55
-    motion_length_px: [3, 7]
+    motion_length_px: [3, 9]
     downsample_probability: 0.32
     downsample_scale: [0.72, 0.96]
     photon_count: [550.0, 4000.0]
