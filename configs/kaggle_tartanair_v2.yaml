@@ -20,7 +20,7 @@ runtime:
   output_dir: /kaggle/working/outputs/v3
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
-  validation_batches: 8
+  validation_batches: 32
 
 data:
   # Cell 3 tu do lai duong dan nay va ghi de neu mount khac.

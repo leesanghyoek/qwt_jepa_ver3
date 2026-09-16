@@ -8,7 +8,7 @@ runtime:
   output_dir: outputs/v3
   log_every_updates: 10
   checkpoint_every_updates: 250
-  validation_batches: 8
+  validation_batches: 32
 
 data:
   root: null
@@ -95,9 +95,12 @@ corruption:
 phase1:
   name: latent_pretrain
   initialization_seed: 73128
-  decoder_enabled: false
-  reconstruction_loss_weight: 0.0
-  coefficient_reconstruction_loss_weight: 0.0
+  # Neo duy nhat trong phase 1 khong tu quy chieu. Khong co no, JEPA co the dat
+  # loss thap tren mot latent da vut bo tin hieu — do dung la ket qua lan truoc.
+  decoder_enabled: true
+  reconstruction_loss_weight: 0.0          # khong co duong pixel-space
+  coefficient_reconstruction_loss_weight: 0.3
+  reconstruction_detail_weight: 0.5        # can them cho bang LH/HL/HH va Haar detail
   online_clean_forward_for_regularization: true
   regularized_maps: [FI, FU, ZI, ZU, FI_clean, FU_clean, ZI_clean, ZU_clean]
   jepa_weight: 1.0

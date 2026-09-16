@@ -21,6 +21,10 @@ model:
   predictor_hidden_dim: 64
 
 phase1:
+  # Smoke giu che do latent thuan (khong decoder) — day van la mot che do hop le
+  # va cac test bien gioi phase 1 dua vao no.
+  decoder_enabled: false
+  coefficient_reconstruction_loss_weight: 0.0
   minimum_statistics_batch: 2
   batch_size: 2
   max_successful_updates: 1

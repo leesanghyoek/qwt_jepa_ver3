@@ -192,6 +192,27 @@ flowchart TD
     EMA --> T
 ```
 
+### Neo reconstruction trong phase 1
+
+JEPA so biểu diễn học được với teacher EMA của **chính encoder đó**, còn
+variance/covariance và sensitivity chỉ là thống kê của biểu diễn. Không số hạng
+nào nhìn vào tín hiệu clean, nên cả hệ có thể trôi về một biểu diễn thô mà loss
+vẫn giảm — đo thực tế cho thấy JEPA đạt 0,054 trên một latent mà hồi quy tuyến
+tính chỉ rút được 17% tín hiệu IMU.
+
+Vì vậy phase 1 có thêm một decoder phụ và số hạng L1 với **hệ số clean thật**:
+`coefficient_reconstruction_loss_weight` (0,3) và `reconstruction_detail_weight`
+(0,5, cân thêm cho băng LH/HL/HH và Haar detail). Đây là số hạng duy nhất không
+tự quy chiếu nên không thể thoả mãn bằng cách vứt tín hiệu.
+
+Decoder phụ dùng đúng `build_decoders`, tức đúng kiến trúc phase 2 sẽ dùng, để
+chữ "giải mã được" có nghĩa thực tế. Nó bị **vứt sau phase 1**; phase 2 vẫn khởi
+tạo decoder mới từ backbone đóng băng, không skip, không residual — luận điểm
+latent-first giữ nguyên. Chi phí: phase 1 chậm thêm ~48% mỗi update.
+
+Đặt `decoder_enabled: false` cùng trọng số 0 để quay lại chế độ latent thuần;
+`configs/smoke.yaml` dùng chế độ đó.
+
 Teacher chỉ gồm hai encoder, deepcopy online lúc khởi tạo. Teacher không có
 fusion, predictor hoặc decoder. Nhánh clean-online chia sẻ trọng số với online
 noisy, vẫn giữ gradient để loss chống collapse điều chỉnh representation clean.
@@ -245,6 +266,7 @@ chuẩn hóa feature; chưa có gain raw riêng.
 | Precision | FP32 | FP32 |
 | Teacher EMA | 0,99 → 0,999 | không dùng |
 | Sensitivity | off 500 updates, ramp 1.000 tới `1e-4` | không dùng |
+| Neo reconstruction | hệ số `0,3`, detail `0,5` | không dùng (loss riêng) |
 
 ## 6. Kiểm tra latent và chuyển phase
 
@@ -260,10 +282,16 @@ std/rank dưới 10% hoặc raw RMS ngoài `[0,1×;10×]` sẽ cảnh báo. Ba k
 tiếp cảnh báo làm gate FAIL và dừng train. Checkpoint WARN cũng chưa được chuyển
 phase. Lịch FD hiện phụ thuộc update count, chưa tự hoãn khi gate WARN.
 
-Phase 2 chỉ nhận checkpoint có đúng version/phase, chưa từng dùng reconstruction,
-zero decoder calls, manifest/config/normalizer/backbone khớp, đủ toàn bộ ngân
-sách phase 1 và gate PASS. Gate PASS kiểm tra suy giảm tương đối, **không chứng
-minh latent đã đủ thông tin khôi phục**; cần xem kết quả phase 2/held-out.
+Phase 2 chỉ nhận checkpoint có đúng version/phase, manifest/config/normalizer/
+backbone khớp, đủ toàn bộ ngân sách phase 1 và gate PASS. Hai trường
+`trained_with_reconstruction` và `phase1_decoder_forward_calls` phải **nhất
+quán với nhau**, để metadata không thể nói dối về cách checkpoint được tạo.
+
+Gate PASS chỉ kiểm tra suy giảm tương đối về phương sai và hạng, **không chứng
+minh latent đã đủ thông tin khôi phục** — một biểu diễn có thể đủ hạng, phương
+sai đẹp mà vẫn chỉ mã hoá thống kê thô. Dùng `tools/latent_probe.py` ngay trên
+checkpoint phase 1 để đo trực tiếp phần thông tin còn lại, thay vì phải train
+xong phase 2 mới biết.
 
 ## 7. Phase 2: decoder khôi phục từ latent
 
