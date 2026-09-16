@@ -50,15 +50,15 @@ corruption:
     black_level: [-0.01, 0.01]
     vignette_strength: [0.0, 0.45]
     defocus_probability: 0.80
-    defocus_sigma_px: [0.4, 3.0]
+    defocus_sigma_px: [0.3, 1.6]
     motion_probability: 0.65
-    motion_length_px: [3, 17]
+    motion_length_px: [3, 9]
     downsample_probability: 0.35
-    downsample_scale: [0.45, 0.90]
-    photon_count: [500.0, 3500.0]
-    read_noise_std: [0.0031372549, 0.0156862745]
-    row_noise_std: [0.0, 0.0058823529]
-    hot_pixel_probability: [0.0, 0.0003]
+    downsample_scale: [0.65, 0.95]
+    photon_count: [900.0, 6000.0]
+    read_noise_std: [0.0019607843, 0.0098039216]
+    row_noise_std: [0.0, 0.0039215686]
+    hot_pixel_probability: [0.0, 0.00015]
     quantization_bits: [6, 8]
     jpeg_probability: 0.35
     jpeg_quality: [35, 80]
