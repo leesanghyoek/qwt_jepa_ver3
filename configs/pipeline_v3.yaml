@@ -55,10 +55,10 @@ corruption:
     motion_length_px: [3, 17]
     downsample_probability: 0.35
     downsample_scale: [0.45, 0.90]
-    photon_count: [250.0, 1800.0]
-    read_noise_std: [0.0039215686, 0.0196078431]
-    row_noise_std: [0.0, 0.0078431373]
-    hot_pixel_probability: [0.0, 0.0008]
+    photon_count: [500.0, 3500.0]
+    read_noise_std: [0.0031372549, 0.0156862745]
+    row_noise_std: [0.0, 0.0058823529]
+    hot_pixel_probability: [0.0, 0.0003]
     quantization_bits: [6, 8]
     jpeg_probability: 0.35
     jpeg_quality: [35, 80]

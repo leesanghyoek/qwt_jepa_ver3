@@ -73,7 +73,7 @@ Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu
 | Giảm độ phân giải | xác suất 0,35; scale 0,45–0,90 |
 | Giảm sáng | exposure gain 0,10–0,55, tone curve gamma 0,50–0,90 |
 | Màu và tối góc | white balance 0,82–1,18; vignette 0–0,45 |
-| Nhiễu cảm biến | shot noise 250–1800 photon; read noise 1/255–5/255; row noise và hot pixel |
+| Nhiễu cảm biến | shot noise 500–3500 photon; read noise 0,8/255–4/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
 | Nhiễu accel | white sigma 0,05–0,30 m/s², bias, random walk |
 | Nhiễu gyro | white sigma 0,002–0,015 rad/s, bias, random walk |
