@@ -68,12 +68,12 @@ Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu
 
 | Nhóm | Thiết lập mặc định |
 | --- | --- |
-| Defocus | xác suất 0,55; sigma 0,25–1,2 px |
-| Motion blur | xác suất 0,45; chiều dài 3–7 px |
-| Giảm độ phân giải | xác suất 0,25; scale 0,72–0,96 |
-| Giảm sáng | exposure gain 0,10–0,55, tone curve gamma 0,50–0,90 |
+| Defocus | xác suất 0,68; sigma 0,25–1,2 px |
+| Motion blur | xác suất 0,55; chiều dài 3–7 px |
+| Giảm độ phân giải | xác suất 0,32; scale 0,72–0,96 |
+| Giảm sáng | exposure gain 0,18–0,60, tone curve gamma 0,45–0,82 |
 | Màu và tối góc | white balance 0,82–1,18; vignette 0–0,45 |
-| Nhiễu cảm biến | shot noise 900–6000 photon; read noise 0,5/255–2,5/255; row noise và hot pixel |
+| Nhiễu cảm biến | shot noise 550–4000 photon; read noise 0,7/255–3,2/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
 | Nhiễu accel | white sigma 0,02–0,45 m/s², bias, random walk |
 | Nhiễu gyro | white sigma 0,001–0,025 rad/s, bias, random walk |
