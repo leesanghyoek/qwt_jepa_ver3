@@ -60,6 +60,33 @@ class Stage(nn.Module):
         return self.net(x)
 
 
+class Upsample(nn.Module):
+    """Sub-pixel convolution: conv mo rong kenh roi trai kenh ra khong gian.
+
+    Noi suy bilinear la bo loc thong thap — no khong the sinh ra tan so cao,
+    nen moi chi tiet nho hon o latent deu mat vinh vien du decoder co sau bao
+    nhieu. Phep nang nay hoc duoc, va no quyet dinh duong net co song hay khong.
+    """
+
+    def __init__(self, channels: int, *, dim: int, factor: int = 2) -> None:
+        super().__init__()
+        if factor < 1:
+            raise ValueError(f"Upsample factor must be positive, got {factor}")
+        self.dim = dim
+        self.factor = factor
+        self.conv = _conv(dim)(channels, channels * factor**dim, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.factor == 1:
+            return x
+        x = self.conv(x)
+        if self.dim == 2:
+            return F.pixel_shuffle(x, self.factor)
+        batch, channels, length = x.shape
+        x = x.reshape(batch, channels // self.factor, self.factor, length)
+        return x.permute(0, 1, 3, 2).reshape(batch, channels // self.factor, length * self.factor)
+
+
 def resize(x: torch.Tensor, size: tuple[int, ...], *, dim: int) -> torch.Tensor:
     mode = "linear" if dim == 1 else "bilinear"
     return F.interpolate(x, size=size, mode=mode, align_corners=False)

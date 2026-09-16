@@ -2,7 +2,16 @@ import copy
 
 import torch
 
-from qjepa.config import build_decoders, build_phase1_model, load_config, seed_everything
+import pytest
+
+from qjepa.config import (
+    build_decoders,
+    build_phase1_model,
+    load_config,
+    seed_everything,
+    validate_config,
+)
+from qjepa.models.blocks import Upsample, resize
 from qjepa.data import ImuNormalizer
 from qjepa.models import RestorationSystem
 from qjepa.training.checkpoints import require_phase1_checkpoint, state_dict_hash
@@ -58,3 +67,71 @@ def test_phase2_changes_decoder_but_not_backbone():
     )
     trainer.assert_backbone_frozen()
 
+
+
+def test_learned_upsampling_can_vary_inside_a_cell_but_bilinear_cannot():
+    constant = torch.ones(1, 8, 4, 4)
+    # Noi suy bilinear cua anh hang so van la hang so: no khong sinh duoc chi tiet.
+    assert float(resize(constant, (8, 8), dim=2).std()) == pytest.approx(0.0, abs=1e-6)
+    block = Upsample(8, dim=2)
+    torch.nn.init.normal_(block.conv.weight, std=0.5)
+    with torch.no_grad():
+        learned = block(constant)
+    assert tuple(learned.shape) == (1, 8, 8, 8)
+    # Bon vi tri con trong cung mot o latent phai khac nhau duoc.
+    assert float(learned[0, 0, :2, :2].std()) > 1e-3
+
+
+def test_learned_upsampling_matches_sub_pixel_ordering_in_one_dimension():
+    block = Upsample(3, dim=1, factor=2)
+    packed = torch.randn(2, 3, 5)
+    scales = torch.arange(1.0, 7.0)
+    with torch.no_grad():
+        block.conv.weight.zero_()
+        block.conv.bias.zero_()
+        # Kenh ra thu o chi lay kenh vao o // 2, nhan mot he so rieng biet.
+        for out_channel in range(6):
+            block.conv.weight[out_channel, out_channel // 2, 1] = scales[out_channel]
+    output = block(packed)
+    # Sub-pixel: out[b, c, l*r + j] phai lay tu kenh conv c*r + j.
+    for channel in range(3):
+        for position in range(5):
+            for offset in range(2):
+                expected = packed[:, channel, position] * scales[channel * 2 + offset]
+                assert torch.allclose(output[:, channel, position * 2 + offset], expected, atol=1e-6)
+
+
+def test_phase1_reconstruction_steers_the_latent_and_marks_the_checkpoint():
+    config = load_config("configs/smoke.yaml")
+    config["phase1"]["decoder_enabled"] = True
+    config["phase1"]["coefficient_reconstruction_loss_weight"] = 0.3
+    config["phase1"]["reconstruction_detail_weight"] = 0.5
+    validate_config(config)
+    seed_everything(5)
+    model = build_phase1_model(config, ImuNormalizer())
+    assert model.reconstructs
+    trainer = Phase1Trainer(model, config, torch.device("cpu"), "manifest")
+    optimized = {id(parameter) for group in trainer.optimizer.param_groups for parameter in group["params"]}
+    assert optimized.issuperset({id(parameter) for parameter in model.decoders.parameters()})
+    before = [parameter.detach().clone() for parameter in model.decoders.parameters()]
+    metrics = trainer.step(_batch())
+    assert not metrics["skipped"]
+    assert metrics["reconstruction"] > 0
+    assert any(
+        not torch.equal(old, new) for old, new in zip(before, model.decoders.parameters())
+    )
+    payload = trainer.checkpoint_payload(config)
+    assert payload["metadata"]["trained_with_reconstruction"] is True
+    assert payload["metadata"]["phase1_decoder_forward_calls"] == 1
+    require_phase1_checkpoint(payload)
+
+
+def test_phase1_rejects_reconstruction_settings_that_do_nothing():
+    config = load_config("configs/smoke.yaml")
+    config["phase1"]["decoder_enabled"] = True
+    with pytest.raises(ValueError, match="coefficient_reconstruction_loss_weight"):
+        validate_config(config)
+    config["phase1"]["decoder_enabled"] = False
+    config["phase1"]["coefficient_reconstruction_loss_weight"] = 0.3
+    with pytest.raises(ValueError, match="decoder_enabled"):
+        validate_config(config)

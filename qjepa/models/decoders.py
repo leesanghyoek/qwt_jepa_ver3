@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .blocks import Stage, initialize_trainable, resize
+from .blocks import Stage, Upsample, initialize_trainable, resize
 
 
 class LatentCoefficientDecoder(nn.Module):
@@ -26,17 +26,23 @@ class LatentCoefficientDecoder(nn.Module):
         for divisor in (4, 2, 1):
             sizes.append(tuple(max(1, (value + divisor - 1) // divisor) for value in output_size))
         self.sizes = tuple(sizes)
+        self.shuffle2 = Upsample(c3, dim=dim)
         self.up2 = Stage(c3, c2, dim=dim, groups=groups)
+        self.shuffle1 = Upsample(c2, dim=dim)
         self.up1 = Stage(c2, c1, dim=dim, groups=groups)
+        self.shuffle0 = Upsample(c1, dim=dim)
         self.up0 = Stage(c1, c0, dim=dim, groups=groups)
         conv = nn.Conv1d if dim == 1 else nn.Conv2d
         self.head = conv(c0, output_channels, 3, padding=1)
         initialize_trainable(self)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
-        x = self.up2(resize(latent, self.sizes[0], dim=self.dim))
-        x = self.up1(resize(x, self.sizes[1], dim=self.dim))
-        x = self.up0(resize(x, self.sizes[2], dim=self.dim))
+        x = self.up2(self.shuffle2(latent))
+        x = self.up1(self.shuffle1(x))
+        x = self.up0(self.shuffle0(x))
+        if tuple(x.shape[2:]) != tuple(self.output_size):
+            # Luoi khong chia het cho 8; chi con lai phan le sau ba lan nhan doi.
+            x = resize(x, self.output_size, dim=self.dim)
         return self.head(x)
 
 
