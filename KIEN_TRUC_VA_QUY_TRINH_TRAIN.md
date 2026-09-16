@@ -80,12 +80,12 @@ thấy một mức khác nhau.
 | Màu và tối góc | white balance 0,82–1,18; vignette 0–0,45 |
 | Nhiễu cảm biến | shot noise 550–4000 photon; read noise 0,7/255–3,2/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
-| Nhiễu accel | white sigma 0,02–0,45 m/s², bias, random walk |
+| Nhiễu accel | white sigma 0,06–0,50 m/s², bias, random walk |
 | Bias instability | chỉ 25% trajectory mắc phải; dao động băng hẹp có giới hạn, sigma 0,10–0,60 m/s² và 0,006–0,040 rad/s, hằng số thời gian 0,3–2 s |
-| Trôi nền nhiễu | hệ số nhân 0,25–4,0 biến thiên liên tục, hằng số thời gian 1,5 s |
-| Nhiễu gyro | white sigma 0,001–0,025 rad/s, bias, random walk |
+| Trôi nền nhiễu | hệ số nhân 0,35–4,0 biến thiên liên tục, hằng số thời gian 1,5 s |
+| Nhiễu gyro | white sigma 0,010–0,060 rad/s, bias, random walk |
 | Rung cơ học | 0–3 tone băng hẹp 8–45 Hz (kẹp dưới Nyquist), biên độ ≤0,35 m/s² và ≤0,02 rad/s, bao biên độ điều biến 0,2–1,5 Hz |
-| Lỗi IMU khác | low-pass, sai scale, trộn trục, spike 0,6 Hz/nhóm (±0,25–2,5 m/s²; ±0,01–0,15 rad/s), dropout 0,10 Hz giữ mẫu, lượng tử |
+| Lỗi IMU khác | low-pass, sai scale, trộn trục, spike 0,6 Hz/nhóm (±0,7–3,5 m/s²; ±0,06–0,28 rad/s), dropout 0,10 Hz giữ mẫu, lượng tử |
 
 Trình tự ảnh: blur/giảm phân giải → exposure/màu/gamma → noise → lượng tử/JPEG.
 Thông số camera ổn định theo đoạn 1 giây; noise cảm biến thay đổi theo frame.

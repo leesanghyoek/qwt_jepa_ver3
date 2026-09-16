@@ -64,8 +64,8 @@ corruption:
     jpeg_quality: [35, 80]
   imu:
     clean_probability: 0.05
-    accel_white_noise_std: [0.02, 0.45]
-    gyro_white_noise_std: [0.001, 0.025]
+    accel_white_noise_std: [0.06, 0.50]
+    gyro_white_noise_std: [0.010, 0.060]
     accel_bias_bound: 0.12
     gyro_bias_bound: 0.008
     accel_bias_random_walk: 0.008
@@ -77,7 +77,7 @@ corruption:
     accel_wander_std: [0.10, 0.60]
     gyro_wander_std: [0.006, 0.040]
     wander_seconds: [0.3, 2.0]
-    noise_gain_drift: [0.25, 4.0]
+    noise_gain_drift: [0.35, 4.0]
     noise_drift_seconds: 1.5
     quantization_step_accel: [0.0, 0.008]
     quantization_step_gyro: [0.0, 0.0004]
@@ -87,8 +87,8 @@ corruption:
     accel_vibration_amplitude: [0.0, 0.35]
     gyro_vibration_amplitude: [0.0, 0.02]
     spike_rate_hz: 0.6
-    accel_spike_amplitude: [0.25, 2.5]
-    gyro_spike_amplitude: [0.01, 0.15]
+    accel_spike_amplitude: [0.7, 3.5]
+    gyro_spike_amplitude: [0.06, 0.28]
     dropout_rate_hz: 0.10
     dropout_length_samples: [2, 8]
 
