@@ -73,8 +73,9 @@ corruption:
     scale_error_std: 0.006
     cross_axis_std: 0.003
     lowpass_sigma_samples: [0.0, 2.5]
-    accel_wander_std: [0.15, 1.60]
-    gyro_wander_std: [0.010, 0.110]
+    wander_probability: 0.25
+    accel_wander_std: [0.10, 0.60]
+    gyro_wander_std: [0.006, 0.040]
     wander_seconds: [0.3, 2.0]
     noise_gain_drift: [0.25, 4.0]
     noise_drift_seconds: 1.5

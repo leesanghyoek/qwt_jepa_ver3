@@ -25,8 +25,9 @@ class ImuCorruptionConfig:
     scale_error_std: float = 0.006
     cross_axis_std: float = 0.003
     lowpass_sigma_samples: tuple[float, float] = (0.0, 2.5)
-    accel_wander_std: tuple[float, float] = (0.15, 1.60)
-    gyro_wander_std: tuple[float, float] = (0.010, 0.110)
+    wander_probability: float = 0.25
+    accel_wander_std: tuple[float, float] = (0.10, 0.60)
+    gyro_wander_std: tuple[float, float] = (0.006, 0.040)
     wander_seconds: tuple[float, float] = (0.3, 2.0)
     noise_gain_drift: tuple[float, float] = (0.25, 4.0)
     noise_drift_seconds: float = 1.5
@@ -131,20 +132,23 @@ class TrajectoryImuCorruptor:
             out += bias
             parameters["bias_initial"] = bias0.tolist()
 
-            # Bias instability: dao dong ngau nhien bang hep quanh gia tri that.
+            # Bias instability: chi mot phan trajectory mac phai, va nhe. Phan con
+            # lai giu residual quanh tam nen nhieu dao dong quanh tin hieu sach.
             # Khac random walk o cho co gioi han, nen khong troi vo han theo thoi gian.
-            step = float(np.median(dt))
-            correlation = float(rng.uniform(*cfg.wander_seconds))
-            amplitude = np.r_[
-                rng.uniform(*cfg.accel_wander_std, 3), rng.uniform(*cfg.gyro_wander_std, 3)
-            ]
-            rough = ndimage.gaussian_filter1d(
-                rng.normal(size=out.shape), max(1.0, correlation / step), axis=0, mode="wrap"
-            )
-            rough /= rough.std(axis=0, keepdims=True) + 1e-12
-            out += rough * amplitude[None, :]
-            parameters["wander_std"] = amplitude.tolist()
-            parameters["wander_seconds"] = correlation
+            parameters["wander"] = bool(rng.random() < cfg.wander_probability)
+            if parameters["wander"]:
+                step = float(np.median(dt))
+                correlation = float(rng.uniform(*cfg.wander_seconds))
+                amplitude = np.r_[
+                    rng.uniform(*cfg.accel_wander_std, 3), rng.uniform(*cfg.gyro_wander_std, 3)
+                ]
+                rough = ndimage.gaussian_filter1d(
+                    rng.normal(size=out.shape), max(1.0, correlation / step), axis=0, mode="wrap"
+                )
+                rough /= rough.std(axis=0, keepdims=True) + 1e-12
+                out += rough * amplitude[None, :]
+                parameters["wander_std"] = amplitude.tolist()
+                parameters["wander_seconds"] = correlation
 
         if white_noise:
             # Nen nhieu khong dung: troi cham doc trajectory nen moi window thay

@@ -126,16 +126,31 @@ def test_imu_wander_is_bounded_and_does_not_diverge_like_a_random_walk():
         vibration_tones=(0, 0),
         quantization_step_accel=(0.0, 0.0),
         quantization_step_gyro=(0.0, 0.0),
+        wander_probability=1.0,
         accel_wander_std=(0.4, 0.4),
         wander_seconds=(1.0, 1.0),
     )
     corrupted, parameters = TrajectoryImuCorruptor(config, master_seed=13).trajectory(
         clean, times, split="train", realization=0, trajectory="T", mode="full"
     )
-    assert parameters["wander_seconds"] == 1.0
+    assert parameters["wander"] and parameters["wander_seconds"] == 1.0
     channel = corrupted[:, 0]
     assert channel.std() == pytest.approx(0.4, rel=0.05)
     # Nua sau khong on hon nua dau: dao dong co gioi han, khong phai random walk.
     first, second = channel[: count // 2], channel[count // 2 :]
     assert second.std() == pytest.approx(first.std(), rel=0.2)
     assert np.abs(channel).max() < 6.0 * 0.4
+
+
+def test_imu_wander_only_affects_a_minority_of_trajectories():
+    rate, count = 100.0, 1024
+    times = np.arange(count, dtype=np.float64) / rate
+    clean = np.zeros((count, 6))
+    config = ImuCorruptionConfig(clean_probability=0.0, wander_probability=0.25)
+    flags = []
+    for index in range(600):
+        _, parameters = TrajectoryImuCorruptor(config, master_seed=3).trajectory(
+            clean, times, split="train", realization=0, trajectory=f"T{index:04d}", mode="full"
+        )
+        flags.append(parameters["wander"])
+    assert 0.20 < np.mean(flags) < 0.30
