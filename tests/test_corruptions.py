@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from qjepa.corruptions import (
     ImuCorruptionConfig,
@@ -77,6 +78,8 @@ def test_imu_vibration_adds_narrowband_tones_below_nyquist():
         quantization_step_gyro=(0.0, 0.0),
         vibration_tones=(2, 2),
         accel_vibration_amplitude=(0.2, 0.2),
+        accel_wander_std=(0.0, 0.0),
+        gyro_wander_std=(0.0, 0.0),
     )
     corrupted, parameters = TrajectoryImuCorruptor(config, master_seed=5).trajectory(
         clean, times, split="train", realization=0, trajectory="T", mode="full"
@@ -104,3 +107,35 @@ def test_imu_vibration_frequency_is_clamped_for_slow_sampling():
     )
     assert parameters["vibration_tones"]
     assert all(tone["frequency_hz"] <= 0.45 * rate for tone in parameters["vibration_tones"])
+
+
+def test_imu_wander_is_bounded_and_does_not_diverge_like_a_random_walk():
+    rate, count = 100.0, 20_000        # 200 s: du dai de random walk lo ro
+    times = np.arange(count, dtype=np.float64) / rate
+    clean = np.zeros((count, 6))
+    config = ImuCorruptionConfig(
+        clean_probability=0.0,
+        accel_white_noise_std=(0.0, 0.0),
+        gyro_white_noise_std=(0.0, 0.0),
+        accel_bias_bound=0.0,
+        gyro_bias_bound=0.0,
+        accel_bias_random_walk=0.0,
+        gyro_bias_random_walk=0.0,
+        spike_rate_hz=0.0,
+        dropout_rate_hz=0.0,
+        vibration_tones=(0, 0),
+        quantization_step_accel=(0.0, 0.0),
+        quantization_step_gyro=(0.0, 0.0),
+        accel_wander_std=(0.4, 0.4),
+        wander_seconds=(1.0, 1.0),
+    )
+    corrupted, parameters = TrajectoryImuCorruptor(config, master_seed=13).trajectory(
+        clean, times, split="train", realization=0, trajectory="T", mode="full"
+    )
+    assert parameters["wander_seconds"] == 1.0
+    channel = corrupted[:, 0]
+    assert channel.std() == pytest.approx(0.4, rel=0.05)
+    # Nua sau khong on hon nua dau: dao dong co gioi han, khong phai random walk.
+    first, second = channel[: count // 2], channel[count // 2 :]
+    assert second.std() == pytest.approx(first.std(), rel=0.2)
+    assert np.abs(channel).max() < 6.0 * 0.4

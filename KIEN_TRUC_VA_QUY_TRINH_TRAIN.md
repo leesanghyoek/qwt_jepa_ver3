@@ -81,6 +81,7 @@ thấy một mức khác nhau.
 | Nhiễu cảm biến | shot noise 550–4000 photon; read noise 0,7/255–3,2/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
 | Nhiễu accel | white sigma 0,02–0,45 m/s², bias, random walk |
+| Bias instability | dao động băng hẹp có giới hạn quanh giá trị thật, sigma 0,15–1,6 m/s² và 0,010–0,110 rad/s, hằng số thời gian 0,3–2 s |
 | Trôi nền nhiễu | hệ số nhân 0,25–4,0 biến thiên liên tục, hằng số thời gian 1,5 s |
 | Nhiễu gyro | white sigma 0,001–0,025 rad/s, bias, random walk |
 | Rung cơ học | 0–3 tone băng hẹp 8–45 Hz (kẹp dưới Nyquist), biên độ ≤0,35 m/s² và ≤0,02 rad/s, bao biên độ điều biến 0,2–1,5 Hz |
