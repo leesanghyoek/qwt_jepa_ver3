@@ -672,7 +672,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise FloatingPointError(f"Phase-2 update skipped: {metrics}")
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
-            print(f"phase2 update={update} loss={metrics['loss']:.6f}")
+            print(
+                f"phase2 update={update} loss={metrics['loss']:.6f}"
+                f" image_l1={metrics['image_l1']:.6f}"
+            )
         if update % checkpoint_every == 0 or update == maximum:
             trainer.assert_backbone_frozen()
             evaluation = _evaluate_with_overlap(
@@ -686,6 +689,24 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             )
             validation = {f"validation_{key}": value for key, value in evaluation.items()}
             log.write({"successful_updates": update, **validation})
+            # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
+            # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
+            # trong train.jsonl ma kernel dang bi chan khong doc duoc.
+            beats = (
+                validation["validation_image_psnr_db"] > validation["validation_baseline_image_psnr_db"]
+                and validation["validation_image_ssim"] > validation["validation_baseline_image_ssim"]
+                and validation["validation_accel_rmse"] < validation["validation_baseline_accel_rmse"]
+            )
+            print(
+                f"  validation update={update}"
+                f" | PSNR {validation['validation_image_psnr_db']:.2f}"
+                f" vs {validation['validation_baseline_image_psnr_db']:.2f}"
+                f" | SSIM {validation['validation_image_ssim']:.3f}"
+                f" vs {validation['validation_baseline_image_ssim']:.3f}"
+                f" | accel {validation['validation_accel_rmse']:.3f}"
+                f" vs {validation['validation_baseline_accel_rmse']:.3f}"
+                f" | {'VUOT baseline' if beats else 'chua vuot'}"
+            )
             payload = trainer.checkpoint_payload(serializable_config(config))
             improved = validation["validation_joint_validation_score"] < best_validation
             if improved:
