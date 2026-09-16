@@ -63,6 +63,7 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     imu_features, imu_targets, cells, patches = [], [], [], []
+    bin_features, bin_targets = [], []
     seen = 0
     for raw in loader:
         if seen >= args.samples:
@@ -74,6 +75,14 @@ def main() -> None:
             imu_clean = system.normalizer.normalize(batch["imu_clean_phys"])
         imu_features.append(latent.ZU.flatten(1).cpu().numpy())
         imu_targets.append(imu_clean.flatten(1).cpu().numpy())
+
+        # Them phep do theo tung bin thoi gian: 128 chieu thay vi 1024, nen so
+        # hang gap 8 lan va ridge khong con chay o vung thieu du lieu.
+        bins = latent.ZU.shape[2]
+        span = imu_clean.shape[2] // bins
+        bin_features.append(latent.ZU.permute(0, 2, 1).reshape(-1, latent.ZU.shape[1]).cpu().numpy())
+        sliced = imu_clean[:, :, : bins * span].reshape(imu_clean.shape[0], imu_clean.shape[1], bins, span)
+        bin_targets.append(sliced.permute(0, 2, 1, 3).reshape(-1, imu_clean.shape[1] * span).cpu().numpy())
 
         # Chi giu vai o moi anh: ca anh se ton ~3 GB RAM cho 4000 mau.
         image = batch["image_clean"]
@@ -90,13 +99,16 @@ def main() -> None:
 
     imu_features = np.concatenate(imu_features).astype(np.float64)
     imu_targets = np.concatenate(imu_targets).astype(np.float64)
+    bin_features = np.concatenate(bin_features).astype(np.float64)
+    bin_targets = np.concatenate(bin_targets).astype(np.float64)
     cells = np.concatenate(cells).astype(np.float64)
     patches = np.concatenate(patches).astype(np.float64)
     print(f"mau = {seen} | ZU -> {imu_features.shape[1]}d | o anh -> {cells.shape[1]}d"
           f" -> mang {patches.shape[1]}d | hang anh = {len(cells)}")
 
-    for label, features, targets in (("IMU", imu_features, imu_targets),
-                                     ("ANH", cells, patches)):
+    for label, features, targets in (("IMU ca cua so", imu_features, imu_targets),
+                                     ("IMU theo bin ", bin_features, bin_targets),
+                                     ("ANH theo o   ", cells, patches)):
         if len(features) <= features.shape[1] * 2:
             print(f"{label} : chi {len(features)} hang cho {features.shape[1]} chieu"
                   f" — tang --samples, ket qua khong dang tin")
