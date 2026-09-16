@@ -68,16 +68,16 @@ Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu
 
 | Nhóm | Thiết lập mặc định |
 | --- | --- |
-| Defocus | xác suất 0,80; sigma 0,3–1,6 px |
-| Motion blur | xác suất 0,65; chiều dài 3–9 px |
-| Giảm độ phân giải | xác suất 0,35; scale 0,65–0,95 |
+| Defocus | xác suất 0,55; sigma 0,25–1,2 px |
+| Motion blur | xác suất 0,45; chiều dài 3–7 px |
+| Giảm độ phân giải | xác suất 0,25; scale 0,72–0,96 |
 | Giảm sáng | exposure gain 0,10–0,55, tone curve gamma 0,50–0,90 |
 | Màu và tối góc | white balance 0,82–1,18; vignette 0–0,45 |
 | Nhiễu cảm biến | shot noise 900–6000 photon; read noise 0,5/255–2,5/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
-| Nhiễu accel | white sigma 0,05–0,30 m/s², bias, random walk |
-| Nhiễu gyro | white sigma 0,002–0,015 rad/s, bias, random walk |
-| Lỗi IMU khác | low-pass, sai scale, trộn trục, spike, dropout giữ mẫu, lượng tử |
+| Nhiễu accel | white sigma 0,02–0,45 m/s², bias, random walk |
+| Nhiễu gyro | white sigma 0,001–0,025 rad/s, bias, random walk |
+| Lỗi IMU khác | low-pass, sai scale, trộn trục, spike 0,6 Hz/nhóm (±0,25–2,5 m/s²; ±0,01–0,15 rad/s), dropout 0,10 Hz giữ mẫu, lượng tử |
 
 Trình tự ảnh: blur/giảm phân giải → exposure/màu/gamma → noise → lượng tử/JPEG.
 Thông số camera ổn định theo đoạn 1 giây; noise cảm biến thay đổi theo frame.

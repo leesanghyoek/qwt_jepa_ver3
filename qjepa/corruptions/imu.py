@@ -16,21 +16,21 @@ IMU_MODES = ("full", "clean", "white_noise_only", "bias_only", "bandwidth_only")
 @dataclass(frozen=True)
 class ImuCorruptionConfig:
     clean_probability: float = 0.05
-    accel_white_noise_std: tuple[float, float] = (0.05, 0.30)
-    gyro_white_noise_std: tuple[float, float] = (0.002, 0.015)
+    accel_white_noise_std: tuple[float, float] = (0.02, 0.45)
+    gyro_white_noise_std: tuple[float, float] = (0.001, 0.025)
     accel_bias_bound: float = 0.12
     gyro_bias_bound: float = 0.008
     accel_bias_random_walk: float = 0.008
     gyro_bias_random_walk: float = 0.0004
     scale_error_std: float = 0.006
     cross_axis_std: float = 0.003
-    lowpass_sigma_samples: tuple[float, float] = (0.0, 1.2)
+    lowpass_sigma_samples: tuple[float, float] = (0.0, 2.5)
     quantization_step_accel: tuple[float, float] = (0.0, 0.008)
     quantization_step_gyro: tuple[float, float] = (0.0, 0.0004)
-    spike_rate_hz: float = 0.08
-    accel_spike_amplitude: tuple[float, float] = (0.3, 1.5)
-    gyro_spike_amplitude: tuple[float, float] = (0.015, 0.08)
-    dropout_rate_hz: float = 0.02
+    spike_rate_hz: float = 0.6
+    accel_spike_amplitude: tuple[float, float] = (0.25, 2.5)
+    gyro_spike_amplitude: tuple[float, float] = (0.01, 0.15)
+    dropout_rate_hz: float = 0.10
     dropout_length_samples: tuple[int, int] = (2, 8)
 
     def validate(self) -> None:
