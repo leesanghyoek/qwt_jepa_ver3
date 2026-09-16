@@ -45,7 +45,7 @@ corruption:
     clean_probability: 0.05
     segment_seconds: 1.0
     exposure_gain: [0.10, 0.55]
-    tone_gamma: [1.10, 1.80]
+    tone_gamma: [0.50, 0.90]
     white_balance_gain: [0.82, 1.18]
     black_level: [-0.01, 0.01]
     vignette_strength: [0.0, 0.45]

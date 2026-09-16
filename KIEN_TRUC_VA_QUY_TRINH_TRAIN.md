@@ -71,7 +71,7 @@ Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu
 | Defocus | xác suất 0,80; sigma 0,4–3 px |
 | Motion blur | xác suất 0,65; chiều dài 3–17 px |
 | Giảm độ phân giải | xác suất 0,35; scale 0,45–0,90 |
-| Giảm sáng | exposure gain 0,10–0,55, gamma 1,10–1,80 |
+| Giảm sáng | exposure gain 0,10–0,55, tone curve gamma 0,50–0,90 |
 | Màu và tối góc | white balance 0,82–1,18; vignette 0–0,45 |
 | Nhiễu cảm biến | shot noise 25–180 photon; read noise 2/255–16/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |

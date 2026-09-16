@@ -26,7 +26,7 @@ class LowLightImageCorruptionConfig:
     clean_probability: float = 0.05
     segment_seconds: float = 1.0
     exposure_gain: tuple[float, float] = (0.10, 0.55)
-    tone_gamma: tuple[float, float] = (1.10, 1.80)
+    tone_gamma: tuple[float, float] = (0.50, 0.90)
     white_balance_gain: tuple[float, float] = (0.82, 1.18)
     black_level: tuple[float, float] = (-0.01, 0.01)
     vignette_strength: tuple[float, float] = (0.0, 0.45)
