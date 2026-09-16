@@ -25,6 +25,8 @@ class ImuCorruptionConfig:
     scale_error_std: float = 0.006
     cross_axis_std: float = 0.003
     lowpass_sigma_samples: tuple[float, float] = (0.0, 2.5)
+    noise_gain_drift: tuple[float, float] = (0.4, 2.2)
+    noise_drift_seconds: float = 3.0
     quantization_step_accel: tuple[float, float] = (0.0, 0.008)
     quantization_step_gyro: tuple[float, float] = (0.0, 0.0004)
     vibration_tones: tuple[int, int] = (0, 3)
@@ -127,7 +129,19 @@ class TrajectoryImuCorruptor:
             parameters["bias_initial"] = bias0.tolist()
 
         if white_noise:
-            out += rng.normal(size=out.shape) * sigma[None, :]
+            # Nen nhieu khong dung: troi cham doc trajectory nen moi window thay
+            # mot muc khac nhau, trong khi cac window chong nhau van khop tuyet doi.
+            step = float(np.median(np.diff(timestamps)))
+            drift = ndimage.gaussian_filter1d(
+                rng.normal(size=len(out)), max(1.0, cfg.noise_drift_seconds / step), mode="nearest"
+            )
+            drift = (drift - drift.mean()) / (drift.std() + 1e-12)
+            low, high = cfg.noise_gain_drift
+            envelope = np.exp(
+                np.log(low) + (np.log(high) - np.log(low)) * 0.5 * (1.0 + np.tanh(drift))
+            )
+            out += rng.normal(size=out.shape) * sigma[None, :] * envelope[:, None]
+            parameters["noise_gain_range"] = [float(envelope.min()), float(envelope.max())]
 
         if mode == "full":
             median_dt = float(np.median(np.diff(timestamps)))

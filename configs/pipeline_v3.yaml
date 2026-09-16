@@ -43,7 +43,7 @@ model:
 corruption:
   image:
     clean_probability: 0.02
-    segment_seconds: 1.0
+    segment_seconds: 0.05
     exposure_gain: [0.21, 0.63]
     tone_gamma: [0.46, 0.79]
     white_balance_gain: [0.82, 1.18]
@@ -73,6 +73,8 @@ corruption:
     scale_error_std: 0.006
     cross_axis_std: 0.003
     lowpass_sigma_samples: [0.0, 2.5]
+    noise_gain_drift: [0.4, 2.2]
+    noise_drift_seconds: 3.0
     quantization_step_accel: [0.0, 0.008]
     quantization_step_gyro: [0.0, 0.0004]
     vibration_tones: [0, 3]

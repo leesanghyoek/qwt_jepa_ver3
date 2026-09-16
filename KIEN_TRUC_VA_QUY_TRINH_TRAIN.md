@@ -66,6 +66,11 @@ không bảo đảm khoảng cách thời gian tối thiểu giữa các frame t
 
 Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu.
 
+Tham số camera bốc theo `segment_seconds: 0,05`, nhỏ hơn khoảng cách giữa hai
+frame ở 10 Hz, nên **mỗi ảnh có mức sáng/nhòe riêng**. Tham số IMU bốc một lần
+cho cả trajectory, nhưng nền nhiễu trôi chậm dọc trajectory nên mỗi window vẫn
+thấy một mức khác nhau.
+
 | Nhóm | Thiết lập mặc định |
 | --- | --- |
 | Defocus | xác suất 0,68; sigma 0,30–1,45 px |
@@ -76,6 +81,7 @@ Clean target được giữ nguyên sau resize/crop. Chỉ input bị làm xấu
 | Nhiễu cảm biến | shot noise 550–4000 photon; read noise 0,7/255–3,2/255; row noise và hot pixel |
 | Lưu ảnh | 6–8 bit; JPEG xác suất 0,35, quality 35–80 |
 | Nhiễu accel | white sigma 0,02–0,45 m/s², bias, random walk |
+| Trôi nền nhiễu | hệ số nhân 0,4–2,2 biến thiên liên tục, hằng số thời gian 3 s |
 | Nhiễu gyro | white sigma 0,001–0,025 rad/s, bias, random walk |
 | Rung cơ học | 0–3 tone băng hẹp 8–45 Hz (kẹp dưới Nyquist), biên độ ≤0,35 m/s² và ≤0,02 rad/s, bao biên độ điều biến 0,2–1,5 Hz |
 | Lỗi IMU khác | low-pass, sai scale, trộn trục, spike 0,6 Hz/nhóm (±0,25–2,5 m/s²; ±0,01–0,15 rad/s), dropout 0,10 Hz giữ mẫu, lượng tử |

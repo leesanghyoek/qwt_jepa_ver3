@@ -24,7 +24,7 @@ IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_onl
 @dataclass(frozen=True)
 class LowLightImageCorruptionConfig:
     clean_probability: float = 0.02
-    segment_seconds: float = 1.0
+    segment_seconds: float = 0.05
     exposure_gain: tuple[float, float] = (0.21, 0.63)
     tone_gamma: tuple[float, float] = (0.46, 0.79)
     white_balance_gain: tuple[float, float] = (0.82, 1.18)
