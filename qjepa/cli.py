@@ -531,7 +531,11 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             raise FloatingPointError(f"Phase-1 update skipped: {metrics}")
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
-            print(f"phase1 update={update} loss={metrics['loss']:.6f} jepa={metrics['jepa']:.6f}")
+            anchor = f" recon={metrics['reconstruction']:.6f}" if "reconstruction" in metrics else ""
+            print(
+                f"phase1 update={update} loss={metrics['loss']:.6f}"
+                f" jepa={metrics['jepa']:.6f}{anchor}"
+            )
         if update % checkpoint_every == 0 or update == maximum:
             validation = _validate_latent(
                 model, validation_loader, device, len(validation_loader), trainer.forward_model
