@@ -1,4 +1,4 @@
-# QWT–JEPA v3 cho ảnh thiếu sáng và IMU
+# QWT–JEPA v3 cho ảnh thiếu nhiễu sáng và IMU
 
 Source: [leesanghyoek/qwt_jepa_ver3](https://github.com/leesanghyoek/qwt_jepa_ver3).
 Trên Kaggle, bắt đầu từ [Cell 1: clone GitHub](KAGGLE_TRAIN_CELLS.md#cell-1--clone-source-từ-github-và-ghi-lại-commit),
