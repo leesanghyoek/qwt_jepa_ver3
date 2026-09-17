@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -183,6 +184,33 @@ class _Jsonl:
     def write(self, payload: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _memory_mib() -> dict[str, float]:
+    """RSS hien tai cua tien trinh train va cac worker con.
+
+    SIGKILL khong de lai traceback, nen khong co so nay thi mot lan OOM chi cho
+    biet "het RAM" chu khong cho biet dang o dau va tang theo nhip nao.
+    """
+
+    def resident(pid: str) -> float:
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) / 1024.0
+        except OSError:
+            pass
+        return 0.0
+
+    children = 0.0
+    try:
+        for task in os.listdir("/proc/self/task"):
+            with open(f"/proc/self/task/{task}/children", encoding="utf-8") as handle:
+                children += sum(resident(pid) for pid in handle.read().split())
+    except OSError:
+        pass
+    return {"rss_mib": resident("self"), "children_rss_mib": children}
 
 
 def _prepare_run(output: Path, resume: str | None, update: int) -> None:
@@ -545,13 +573,20 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             gate_status = "PASS" if passed else (
                 "FAIL" if warning_checks >= config["monitor"]["consecutive_warning_checks"] else "WARN"
             )
+            memory = _memory_mib()
             log.write(
                 {
                     "successful_updates": update,
                     "latent_gate_status": gate_status,
                     "latent_gate_reasons": gate_reasons,
+                    **memory,
                     **validation,
                 }
+            )
+            print(
+                f"  gate update={update} {gate_status}"
+                f" | RSS {memory['rss_mib']:.0f} MiB"
+                f" + worker {memory['children_rss_mib']:.0f} MiB"
             )
             atomic_torch_save(
                 trainer.checkpoint_payload(
@@ -688,7 +723,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 forward_model=trainer.forward_model,
             )
             validation = {f"validation_{key}": value for key, value in evaluation.items()}
-            log.write({"successful_updates": update, **validation})
+            memory = _memory_mib()
+            log.write({"successful_updates": update, **memory, **validation})
             # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
             # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
             # trong train.jsonl ma kernel dang bi chan khong doc duoc.
@@ -706,6 +742,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 f" | accel {validation['validation_accel_rmse']:.3f}"
                 f" vs {validation['validation_baseline_accel_rmse']:.3f}"
                 f" | {'VUOT baseline' if beats else 'chua vuot'}"
+                f" | RSS {memory['rss_mib']:.0f}+{memory['children_rss_mib']:.0f} MiB"
             )
             payload = trainer.checkpoint_payload(serializable_config(config))
             improved = validation["validation_joint_validation_score"] < best_validation
