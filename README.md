@@ -53,6 +53,97 @@ tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó.
 Mọi shape và số tham số dưới đây được **in ra từ chính model** dựng bằng
 `configs/pipeline_v3.yaml`, không phải tính tay. Batch `B` được lược khỏi bảng.
 
+### Sơ đồ đầy đủ
+
+```mermaid
+flowchart TB
+    XN["<b>Ảnh nhiễu</b><br/>3 × 256 × 256"]
+    UN["<b>IMU nhiễu</b><br/>6 × 128"]
+    TM["Timestamp cam + IMU<br/>metadata 3 chiều"]
+
+    subgraph S1["① Wavelet · 0 tham số · khả nghịch"]
+        QW["QWT dual-tree db4<br/>3 màu × 4 băng × 4 thành phần<br/><b>Ci = 48 × 128 × 128</b>"]
+        HA["Haar 1-D trực chuẩn<br/>6 kênh × 2 băng<br/><b>Cu = 12 × 64</b>"]
+    end
+
+    subgraph S2["② Encoder · 4 stage ConvBlock+ResBlock · 1,00 M tham số"]
+        EI0["32 × 128 × 128"] --> EI1["64 × 64 × 64"] --> EI2["96 × 32 × 32"] --> EI3["<b>FI = 128 × 16 × 16</b>"]
+        EU0["32 × 64"] --> EU1["64 × 32"] --> EU2["96 × 16"] --> EU3["<b>FU = 128 × 8</b>"]
+    end
+
+    subgraph S3["③ Gated fusion · 0,33 M"]
+        FS["ảnh 128 + IMU 128 + meta 3 = 259<br/>MLP 259 → 256 → 128<br/>cổng sigmoid bias −2 ⇒ gần identity lúc đầu"]
+    end
+
+    ZI["<b>ZI = 128 × 16 × 16</b><br/>32.768 số · nén 6,0×<br/>1 ô latent = khối 16 × 16 pixel"]
+    ZU["<b>ZU = 128 × 8</b><br/>1.024 số · giãn 0,75×<br/>IMU không bị nén"]
+
+    XN --> QW --> EI0
+    UN --> HA --> EU0
+    EI3 & EU3 & TM --> FS
+    FS --> ZI & ZU
+
+    subgraph P1["PHASE 1 · chỉ học latent · mọi khối trong khung này bị vứt sau phase 1"]
+        CLEAN["Ảnh + IMU <b>SẠCH</b><br/>chỉ có lúc train"]
+        TE["Teacher EMA<br/>bản sao encoder · KHÔNG gradient<br/>m: 0,99 → 0,999"]
+        PR["Predictor mỗi modality<br/>LN → 128→256 → GELU → 256→128<br/>256 token ảnh · 8 token IMU"]
+        AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>cùng kiến trúc decoder phase 2"]
+        JE(["JEPA loss<br/>online nhiễu ≈ teacher sạch"])
+        VC(["Variance + Covariance<br/>chống collapse · 8 raw map"])
+        JA(["Encoder sensitivity Jacobian<br/>Hutchinson + Rademacher<br/>bật sau update 500"])
+        ANL(["Anchor loss · trọng số 0,45<br/>+ băng chi tiết 0,5"])
+        CLEAN --> TE --> JE
+        PR --> JE
+        AN --> ANL
+        CLEAN -. "hệ số wavelet sạch = đích" .-> ANL
+    end
+
+    ZI & ZU --> PR
+    ZI & ZU --> AN
+    ZI & ZU --> VC
+    EI3 & EU3 -. "đo TRƯỚC fusion" .-> JA
+    EI3 & EU3 --> VC
+
+    subgraph P2["PHASE 2 · backbone ĐÓNG BĂNG · chỉ train 1,86 M tham số decoder"]
+        DI["Decoder ảnh · sub-pixel conv pixel shuffle<br/>128×16×16 → 128×32×32 → 96×32×32<br/>→ 96×64×64 → 64×64×64<br/>→ 64×128×128 → 32×128×128"]
+        DU["Decoder IMU · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
+        HI["head conv 3×3 · <b>zero-init</b><br/>Δi = 48 × 128 × 128"]
+        HU["head conv 3×3 · <b>zero-init</b><br/>Δu = 12 × 64"]
+        PI(("＋"))
+        PU(("＋"))
+        SI["QWT synthesis"]
+        SU["Haar synthesis"]
+        OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
+        OU["<b>IMU phục hồi</b><br/>6 × 128"]
+        L1(["L1 pixel + SmoothL1 accel/gyro<br/>+ băng chi tiết LH/HL/HH · trọng số 0,5"])
+        DI --> HI --> PI --> SI --> OI --> L1
+        DU --> HU --> PU --> SU --> OU --> L1
+    end
+
+    ZI --> DI
+    ZU --> DU
+    QW -. "Ci · hệ số của chính ảnh mờ" .-> PI
+    HA -. "Cu" .-> PU
+
+    classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
+    classDef bb fill:#e3f2fd,stroke:#1e88e5,color:#1a1a1a
+    classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
+    classDef p1 fill:#fff8e1,stroke:#f9a825,color:#1a1a1a
+    classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
+    classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
+    class QW,HA,SI,SU tf
+    class EI0,EI1,EI2,EI3,EU0,EU1,EU2,EU3,FS bb
+    class ZI,ZU lat
+    class CLEAN,TE,PR,AN p1
+    class DI,DU,HI,HU,PI,PU,OI,OU p2
+    class JE,VC,JA,ANL,L1 loss
+```
+
+Đọc màu: <b>xanh tím</b> = wavelet, không có tham số và khả nghịch · <b>xanh dương</b> = backbone, học ở phase 1 rồi đóng băng · <b>tím</b> = latent · <b>vàng</b> = chỉ sống trong phase 1 và bị vứt · <b>xanh lá</b> = decoder phase 2 · <b>hồng</b> = số hạng loss.
+
+Nét đứt là hai đường **không đi qua trọng số nào**: hệ số của chính ảnh/IMU
+nhiễu cộng thẳng vào đầu ra ở phase 2, và hệ số sạch làm đích cho neo ở phase 1.
+
 ### Một sample gồm gì
 
 | | Shape | Số phần tử |
