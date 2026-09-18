@@ -14,17 +14,27 @@ def test_main_config_enforces_real_batch_eight():
         validate_config(bad)
 
 
-def test_phase_contracts_reject_decoder_or_bypass():
+def test_phase_contracts_reject_unimplemented_paths_and_lying_config():
     config = load_config("configs/smoke.yaml")
     for section, key, value in (
-        ("phase1", "decoder_enabled", True),
-        ("phase1", "reconstruction_loss_weight", 1.0),
-        ("phase2", "encoder_skips", True),
-        ("phase2", "input_coefficient_residual", True),
+        ("phase1", "decoder_enabled", True),          # bat decoder ma trong so 0
+        ("phase1", "reconstruction_loss_weight", 1.0),  # khong co duong pixel-space
+        ("phase2", "encoder_skips", True),            # chua duoc cai dat
+        ("phase2", "reconstruction_detail_weight", -1.0),
     ):
         bad = copy.deepcopy(config)
         bad[section][key] = value
         with pytest.raises(ValueError):
+            validate_config(bad)
+
+
+def test_residual_mode_must_match_its_declared_output():
+    config = load_config("configs/smoke.yaml")
+    for residual, declared in ((True, "absolute_prediction"), (False, "input_residual")):
+        bad = copy.deepcopy(config)
+        bad["phase2"]["input_coefficient_residual"] = residual
+        bad["phase2"]["output_coefficients"] = declared
+        with pytest.raises(ValueError, match="output_coefficients"):
             validate_config(bad)
 
 

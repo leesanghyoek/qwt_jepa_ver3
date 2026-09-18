@@ -70,25 +70,38 @@ class Phase2Trainer:
         self.system.train(True)
         self.optimizer.zero_grad(set_to_none=True)
         lr = self._set_lr()
-        totals: dict[str, float] = {"loss": 0.0, "image_l1": 0.0, "imu_accel_smooth_l1": 0.0, "imu_gyro_smooth_l1": 0.0}
+        totals: dict[str, float] = {"loss": 0.0, "image_l1": 0.0, "imu_accel_smooth_l1": 0.0,
+                                    "imu_gyro_smooth_l1": 0.0}
         for raw_batch in microbatches:
             batch = _to_device(raw_batch, self.device)
             restored = self.forward_model(
                 batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"]
             )
             clean_imu = self.system.normalizer.normalize(batch["imu_clean_phys"])
+            detail_weight = float(self.phase.get("reconstruction_detail_weight", 0.0))
+            image_target = imu_target = None
+            if detail_weight > 0:
+                backbone = self.system.backbone
+                with torch.no_grad():
+                    image_target, _ = backbone.image_transform.analysis(batch["image_clean"])
+                    imu_target, _ = backbone.imu_transform.analysis(clean_imu)
             loss, parts = phase2_reconstruction_loss(
                 restored["image"],
                 batch["image_clean"],
                 restored["imu_normalized"],
                 clean_imu,
                 beta=self.phase["smooth_l1_beta"],
+                image_coefficients=restored["image_coefficients"],
+                image_coefficient_target=image_target,
+                imu_coefficients=restored["imu_coefficients"],
+                imu_coefficient_target=imu_target,
+                detail_weight=detail_weight,
             )
             loss = self.phase["reconstruction_loss_weight"] * loss
             (loss / expected).backward()
             totals["loss"] += float(loss.detach()) / expected
             for key, value in parts.items():
-                totals[key] += float(value.detach()) / expected
+                totals[key] = totals.get(key, 0.0) + float(value.detach()) / expected
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
         if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
             self.optimizer.zero_grad(set_to_none=True)

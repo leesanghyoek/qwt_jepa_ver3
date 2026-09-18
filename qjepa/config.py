@@ -108,13 +108,24 @@ def validate_config(config: dict[str, Any]) -> None:
     required_phase2 = {
         "freeze_backbone": True,
         "decoder_input": "fused_dense_latent_only",
+        # Skip tu tang trung gian cua encoder KHONG duoc cai dat; encoders.py co
+        # tinh khong lo tang trung gian. Giu False de khong ai tuong no chay.
         "encoder_skips": False,
-        "input_coefficient_residual": False,
-        "output_coefficients": "absolute_prediction",
     }
     for key, required in required_phase2.items():
         if phase2.get(key) != required:
             raise ValueError(f"phase2.{key} must be {required!r}")
+    # Hai khoa nay phai noi cung mot chuyen, neu khong config se noi doi ve
+    # viec decoder that su lam gi.
+    residual = bool(phase2.get("input_coefficient_residual", False))
+    expected_output = "input_residual" if residual else "absolute_prediction"
+    if phase2.get("output_coefficients") != expected_output:
+        raise ValueError(
+            f"phase2.output_coefficients must be {expected_output!r} when"
+            f" input_coefficient_residual is {residual}"
+        )
+    if phase2.get("reconstruction_detail_weight", 0.0) < 0:
+        raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
         raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
     if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":
@@ -167,17 +178,20 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         backbone=build_backbone(config),
         normalizer=normalizer,
         predictor_hidden=config["model"]["predictor_hidden_dim"],
-        decoders=build_decoders(config) if enabled else None,
+        decoders=build_decoders(config, residual=False) if enabled else None,
     )
 
 
-def build_decoders(config: dict[str, Any]) -> LatentDecoders:
+def build_decoders(config: dict[str, Any], *, residual: bool | None = None) -> LatentDecoders:
     image_size = config["data"]["image_size"]
+    if residual is None:
+        residual = bool(config["phase2"].get("input_coefficient_residual", False))
     return LatentDecoders(
         image_coefficient_size=(image_size[0] // 2, image_size[1] // 2),
         imu_coefficient_length=config["data"]["imu_window"] // 2,
         channels=tuple(config["model"]["encoder_channels"]),
         groups=config["model"]["groupnorm_groups"],
+        residual=residual,
     )
 
 

@@ -92,4 +92,6 @@ class RestorationForward(nn.Module):
     def forward(self, image_noisy, imu_noisy_phys, image_time, imu_times) -> dict[str, torch.Tensor]:
         result = self.system(image_noisy, imu_noisy_phys, image_time, imu_times)
         return {"image": result.image, "imu_normalized": result.imu_normalized,
-                "imu_physical": result.imu_physical}
+                "imu_physical": result.imu_physical,
+                "image_coefficients": result.image_coefficients,
+                "imu_coefficients": result.imu_coefficients}

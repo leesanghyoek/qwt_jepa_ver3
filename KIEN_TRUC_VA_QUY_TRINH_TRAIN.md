@@ -201,7 +201,7 @@ vẫn giảm — đo thực tế cho thấy JEPA đạt 0,054 trên một latent
 tính chỉ rút được 17% tín hiệu IMU.
 
 Vì vậy phase 1 có thêm một decoder phụ và số hạng L1 với **hệ số clean thật**:
-`coefficient_reconstruction_loss_weight` (0,3) và `reconstruction_detail_weight`
+`coefficient_reconstruction_loss_weight` (0,45) và `reconstruction_detail_weight`
 (0,5, cân thêm cho băng LH/HL/HH và Haar detail). Đây là số hạng duy nhất không
 tự quy chiếu nên không thể thoả mãn bằng cách vứt tín hiệu.
 
@@ -266,7 +266,7 @@ chuẩn hóa feature; chưa có gain raw riêng.
 | Precision | FP32 | FP32 |
 | Teacher EMA | 0,99 → 0,999 | không dùng |
 | Sensitivity | off 500 updates, ramp 1.000 tới `1e-4` | không dùng |
-| Neo reconstruction | hệ số `0,3`, detail `0,5` | không dùng (loss riêng) |
+| Neo reconstruction | hệ số `0,45`, detail `0,5` | detail `0,5` trên băng LH/HL/HH |
 
 ## 6. Kiểm tra latent và chuyển phase
 
@@ -300,10 +300,14 @@ flowchart LR
     X[Input noisy] --> B[Backbone và normalizer frozen, eval, no_grad]
     B --> ZI[ZI: 128 x 16 x 16]
     B --> ZU[ZU: 128 x 8]
+    B --> BI[Hệ số input: 48 x 128 x 128]
+    B --> BU[Hệ số input: 12 x 64]
     ZI --> DI[Decoder ảnh mới]
     ZU --> DU[Decoder IMU mới]
-    DI --> CI[Hệ số tuyệt đối: 48 x 128 x 128]
-    DU --> CU[Hệ số tuyệt đối: 12 x 64]
+    DI --> CI[Hệ số = input + hiệu chỉnh]
+    DU --> CU[Hệ số = input + hiệu chỉnh]
+    BI --> CI
+    BU --> CU
     CI --> II[Inverse transform ảnh]
     CU --> IU[Inverse Haar]
     II --> RI[Ảnh raw 3 x 256 x 256]
@@ -317,22 +321,53 @@ flowchart LR
 | Tầng decoder | Ảnh | IMU |
 | --- | --- | --- |
 | Input latent | `128×16×16` | `128×8` |
-| Resize + Stage 128→96 | `96×32×32` | `96×16` |
-| Resize + Stage 96→64 | `64×64×64` | `64×32` |
-| Resize + Stage 64→32 | `32×128×128` | `32×64` |
-| Conv head kernel 3 | `48×128×128` | `12×64` |
+| Sub-pixel ×2 + Stage 128→96 | `96×32×32` | `96×16` |
+| Sub-pixel ×2 + Stage 96→64 | `64×64×64` | `64×32` |
+| Sub-pixel ×2 + Stage 64→32 | `32×128×128` | `32×64` |
+| Conv head kernel 3 (zero-init) | `48×128×128` | `12×64` |
+| Cộng hệ số input | `48×128×128` | `12×64` |
 | Synthesis | `3×256×256` | `6×128` |
 
-Resize bilinear cho ảnh, linear cho IMU, `align_corners=False`. Head tuyến tính
-dự đoán hệ số tuyệt đối, không cộng input coefficient. Decoder chỉ nhận ZI/ZU,
-không nhận FI/FU, ảnh/IMU raw hay skip tầng sớm. Layout dùng cho inverse transform
-là metadata shape, không chứa tín hiệu nhiễu để bypass latent.
+Phép nâng độ phân giải là **sub-pixel convolution**, không phải nội suy. Nội suy
+bilinear là bộ lọc thông thấp nên không sinh được tần số cao — mọi chi tiết nhỏ
+hơn một ô latent sẽ mất trước khi các tầng conv chạy.
+
+### Residual trên hệ số đầu vào
+
+Với `input_coefficient_residual: true`, decoder dự đoán **hiệu chỉnh** chứ không
+phải hệ số tuyệt đối:
+
+```text
+C_out = C_in + Δ(Z)
+```
+
+Head khởi tạo bằng 0 nên **update 0 trả lại đúng hệ số đầu vào**. Đó là sàn đảm
+bảo bằng toán: model không bao giờ tệ hơn việc không làm gì. Ở chế độ tuyệt đối
+trước đây, một ảnh gần sạch (`blur_only`, PSNR 37,5 dB) bị kéo xuống 15,7 dB.
+
+`Δ` cũng chính là **đóng góp đo được của latent**: ép `Δ = 0` cho ra baseline,
+model đầy đủ cho ra baseline cộng phần latent thêm vào.
+
+Decoder phụ của **phase 1 giữ chế độ tuyệt đối** (`build_decoders(residual=False)`).
+Cho nó residual sẽ phá vỡ mục đích của neo — nó sẽ học `Δ ≈ 0` và không ép được
+thông tin nào vào latent.
+
+Skip từ tầng trung gian của encoder **không được cài đặt**; `encoder_skips` bị ép
+`false` và `encoders.py` cố tình không lộ tầng trung gian. Layout dùng cho inverse
+transform là metadata shape, không chứa tín hiệu.
 
 ```text
 L_phase2 = L1(image_raw_restored, image_clean)
            + 0.5 × [SmoothL1(accel_norm_restored, accel_norm_clean)
                     + SmoothL1(gyro_norm_restored, gyro_norm_clean)]
+           + 0.5 × [L1(hệ số ảnh băng LH/HL/HH)
+                    + 0.5 × L1(hệ số IMU băng detail)]
 ```
+
+Số hạng cuối (`reconstruction_detail_weight: 0.5`) phạt riêng phần đường nét bị
+mất. L1 trên pixel tối ưu về trung vị có điều kiện, mà với bài toán bất định như
+khử mờ thì nghiệm đó **chính là ảnh mờ** — nên cần một số hạng nhắm thẳng vào
+băng chi tiết.
 
 Không clamp ảnh trước loss train. Clamp chỉ khi tính image metrics/hiển thị/xuất
 PNG. IMU loss dùng normalized để cân bằng scale; chỉ số cuối dùng đơn vị vật lý.

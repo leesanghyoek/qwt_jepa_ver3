@@ -99,7 +99,7 @@ phase1:
   # loss thap tren mot latent da vut bo tin hieu — do dung la ket qua lan truoc.
   decoder_enabled: true
   reconstruction_loss_weight: 0.0          # khong co duong pixel-space
-  coefficient_reconstruction_loss_weight: 0.3
+  coefficient_reconstruction_loss_weight: 0.45
   reconstruction_detail_weight: 0.5        # can them cho bang LH/HL/HH va Haar detail
   online_clean_forward_for_regularization: true
   regularized_maps: [FI, FU, ZI, ZU, FI_clean, FU_clean, ZI_clean, ZU_clean]
@@ -150,8 +150,10 @@ phase2:
   freeze_backbone: true
   decoder_input: fused_dense_latent_only
   encoder_skips: false
-  input_coefficient_residual: false
-  output_coefficients: absolute_prediction
+  # Decoder du doan HIEU CHINH tren he so dau vao, head zero-init: update 0
+  # tra lai dung input, nen model khong bao gio te hon viec khong lam gi.
+  input_coefficient_residual: true
+  output_coefficients: input_residual
   reconstruction_loss_weight: 1.0
   jepa_loss_weight: 0.0
   sensitivity_loss_weight: 0.0
@@ -163,5 +165,6 @@ phase2:
   warmup_updates: 250
   minimum_lr: 0.000001
   gradient_clip_norm: 5.0
+  reconstruction_detail_weight: 0.5   # phat rieng bang LH/HL/HH va Haar detail
   smooth_l1_beta: 1.0
   precision: fp32

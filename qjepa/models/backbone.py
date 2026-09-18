@@ -20,6 +20,10 @@ class LatentBatch:
     ZU: torch.Tensor
     image_layout: TransformLayout
     imu_layout: TransformLayout
+    # He so cua chinh dau vao. Phase 2 dung chung lam nen cho residual; phase 1
+    # bo qua, vi neo phai ep thong tin VAO latent chu khong duoc lay duong vong.
+    image_coefficients: torch.Tensor | None = None
+    imu_coefficients: torch.Tensor | None = None
 
 
 class MultimodalBackbone(nn.Module):
@@ -72,4 +76,4 @@ class MultimodalBackbone(nn.Module):
         fi = self.image_encoder(image_coeff)
         fu = self.imu_encoder(imu_coeff)
         zi, zu = self.fusion(fi, fu, build_time_metadata(image_time, imu_times))
-        return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout)
+        return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout, image_coeff, imu_coeff)

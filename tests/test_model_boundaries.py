@@ -1,5 +1,6 @@
 import inspect
 
+import pytest
 import torch
 
 from qjepa.config import build_backbone, build_decoders, build_phase1_model, load_config
@@ -31,18 +32,40 @@ def test_phase1_has_dense_shapes_teacher_stop_gradient_and_no_decoder():
     assert not any("decoder" in name for name, _ in model.named_modules())
 
 
-def test_decoder_api_accepts_latents_only_and_preserves_batch_permutation():
+def test_absolute_decoder_ignores_the_input_and_preserves_batch_permutation():
     config = load_config("configs/smoke.yaml")
-    decoder = build_decoders(config).eval()
+    decoder = build_decoders(config, residual=False).eval()
     signature = inspect.signature(decoder.forward)
-    assert list(signature.parameters) == ["ZI", "ZU"]
+    assert list(signature.parameters) == ["ZI", "ZU", "image_base", "imu_base"]
     zi = torch.randn(3, 32, 2, 2)
     zu = torch.randn(3, 32, 2)
     image_coeff, imu_coeff = decoder(zi, zu)
+    # Che do tuyet doi phai BO QUA base, neu khong day la mot skip lot vao.
+    other_image = torch.randn_like(image_coeff)
+    other_imu = torch.randn_like(imu_coeff)
+    same_image, same_imu = decoder(zi, zu, other_image, other_imu)
+    assert torch.equal(same_image, image_coeff)
+    assert torch.equal(same_imu, imu_coeff)
     permutation = torch.tensor([2, 0, 1])
     image_permuted, imu_permuted = decoder(zi[permutation], zu[permutation])
     assert torch.allclose(image_permuted, image_coeff[permutation])
     assert torch.allclose(imu_permuted, imu_coeff[permutation])
+
+
+def test_residual_decoder_starts_at_identity_and_needs_the_base():
+    config = load_config("configs/smoke.yaml")
+    decoder = build_decoders(config, residual=True).eval()
+    zi = torch.randn(3, 32, 2, 2)
+    zu = torch.randn(3, 32, 2)
+    image_base = torch.randn(3, 48, 16, 16)
+    imu_base = torch.randn(3, 12, 16)
+    with torch.no_grad():
+        image_coeff, imu_coeff = decoder(zi, zu, image_base, imu_base)
+    # Head zero-init: san dam bao bang identity truoc khi hoc bat cu dieu gi.
+    assert torch.equal(image_coeff, image_base)
+    assert torch.equal(imu_coeff, imu_base)
+    with pytest.raises(ValueError, match="input coefficients"):
+        decoder(zi, zu)
 
 
 def test_restoration_shapes_come_from_absolute_coefficients():
