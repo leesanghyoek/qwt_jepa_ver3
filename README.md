@@ -48,6 +48,163 @@ của lần train đầu tiên. Vẫn không có đường pixel-space trong pha
 Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi
 tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó.
 
+## Kiến trúc chi tiết
+
+Mọi shape và số tham số dưới đây được **in ra từ chính model** dựng bằng
+`configs/pipeline_v3.yaml`, không phải tính tay. Batch `B` được lược khỏi bảng.
+
+### Một sample gồm gì
+
+| | Shape | Số phần tử |
+|---|---|---|
+| Ảnh RGB | `[3, 256, 256]` | 196.608 |
+| IMU (ax ay az gx gy gz) | `[6, 128]` | 768 |
+| Timestamp camera | `[1]` | |
+| Timestamp IMU | `[128]` | |
+
+Window IMU dài 1,27 s và **phải bao quanh** thời điểm chụp ảnh; `build_time_metadata`
+từ chối sample vi phạm thay vì âm thầm căn lệch.
+
+### Tầng 1 — biến đổi wavelet (không tham số)
+
+Hai biến đổi này **khả nghịch và không có tham số học được**; chúng chỉ đổi hệ
+toạ độ.
+
+**Ảnh — QWT dual-tree db4, 1 mức.** Bốn cây db4 dịch pha nguyên chạy song song.
+Gói kênh theo thứ tự `[màu, băng, thành phần]`:
+
+```
+3 màu (R,G,B) × 4 băng (approx, detail_y, detail_x, detail_xy) × 4 thành phần (real, i, j, k) = 48 kênh
+[3, 256, 256]  ->  [48, 128, 128]
+```
+
+Băng `approx` (LL) giữ độ sáng và bố cục; ba băng `detail_*` giữ **đường nét**.
+Đây chính là nhóm băng mà loss chi tiết ở phase 2 nhắm vào.
+
+**IMU — Haar 1-D trực chuẩn, 1 mức.** Nửa đầu là approx, nửa sau là detail:
+
+```
+6 kênh × 2 băng = 12 kênh
+[6, 128]  ->  [12, 64]
+```
+
+### Tầng 2 — encoder (CNN 4 stage)
+
+Mỗi `Stage` = `ConvBlock` (conv 3×3 → GroupNorm 8 nhóm → SiLU) + `ResBlock`
+(hai conv 3×3 + GroupNorm, cộng tắt `act(x + norm2(conv2(y)))`). Stage 0 giữ
+nguyên kích thước, ba stage sau `stride=2`.
+
+| Stage | Encoder ảnh | Encoder IMU |
+|---|---|---|
+| vào | `[48, 128, 128]` | `[12, 64]` |
+| 0 | `[32, 128, 128]` | `[32, 64]` |
+| 1 — stride 2 | `[64, 64, 64]` | `[64, 32]` |
+| 2 — stride 2 | `[96, 32, 32]` | `[96, 16]` |
+| 3 — stride 2 | **`FI = [128, 16, 16]`** | **`FU = [128, 8]`** |
+
+`DenseCoefficientEncoder` **chỉ trả feature cuối**; các tensor trung gian nằm
+trong `nn.Sequential` và không thoát ra ngoài, nên không thể vô tình biến thành
+skip connection cho decoder.
+
+### Tầng 3 — fusion có cổng
+
+`SharedGatedFusion` giữ nguyên lưới không gian/thời gian, chỉ trộn thêm ngữ cảnh
+toàn cục:
+
+1. Tóm tắt ảnh = trung bình không gian của `FI` → LayerNorm → `[128]`.
+2. Tóm tắt IMU = `AdaptiveAvgPool1d(4)` trên `FU` → phẳng `[512]` → Linear → LayerNorm → `[128]`.
+3. Metadata thời gian `[3]`: lệch tâm chuẩn hoá, `log(span)`, `log(dt/0.01)`.
+4. Nối `[128+128+3 = 259]` → MLP `259 → 256 → 128` → LayerNorm = vector chia sẻ.
+5. Vector đó được phát lại lên từng vị trí, nối với feature gốc, qua hai conv 1×1,
+   rồi **cộng có cổng**:
+
+```
+ZI = FI + sigmoid(gate_i) * delta_i(FI, shared)
+ZU = FU + sigmoid(gate_u) * delta_u(FU, shared)
+```
+
+Cổng khởi tạo `weight = 0`, `bias = -2.0`, nên `sigmoid(-2) ≈ 0,12`: lúc bắt đầu
+fusion gần như là identity và mỗi modality tự học trước, tránh việc một nhánh
+nhiễu kéo sập nhánh kia ngay từ update đầu.
+
+### Latent — chỗ quyết định trần chất lượng
+
+| | Shape | Số phần tử | So với input | |
+|---|---|---|---|---|
+| `ZI` | `[128, 16, 16]` | 32.768 | 196.608 | **nén 6,0×** |
+| `ZU` | `[128, 8]` | 1.024 | 768 | **giãn 0,75×** |
+
+Hai dòng này giải thích phần lớn kết quả đo được:
+
+- `ZI` là `16×16`, tức **mỗi ô latent phải mô tả một khối 16×16 pixel**. Đây là
+  trần cứng của chi tiết ảnh, và không decoder nào vượt qua được nó. Muốn nét hơn
+  thì phải sửa chỗ này (`encoders.py`, đổi `stride=2` của stage cuối thành `1` để
+  có latent `32×32`), không phải sửa decoder.
+- `ZU` **không hề nén** — nó còn nhiều số hơn chính tín hiệu IMU. Đó là lý do
+  metric IMU luôn tốt hơn metric ảnh: bài toán IMU không bị bóp cổ chai.
+
+### Phase 1 — những khối chỉ tồn tại lúc train
+
+**Teacher EMA** (`EMATeachers`): bản `deepcopy` của hai encoder online, **không có
+gradient**, cập nhật bằng `θ_t ← m·θ_t + (1−m)·θ_o` với `m` đi từ 0,99 lên 0,999.
+Teacher ăn dữ liệu **sạch**, online ăn dữ liệu **nhiễu**.
+
+**Predictor** (`LatentPredictor`, mỗi modality một cái): MLP theo từng token,
+`LayerNorm → Linear(128→256) → GELU → Linear(256→128)`. Token ảnh là `16×16 = 256`
+vị trí, token IMU là `8` vị trí. Nó dự đoán latent của teacher từ latent online.
+
+**Decoder neo**: cùng kiến trúc decoder phase 2 nhưng **hệ số tuyệt đối**, chấm
+điểm trên hệ số wavelet sạch, trọng số 0,45. Bị vứt sau phase 1.
+
+**Encoder sensitivity (khối Jacobian)**: ước lượng Hutchinson bằng sai phân hữu
+hạn với probe Rademacher, đo trên dense feature **trước fusion**, bật sau update
+500 và ramp trong 1000 update.
+
+### Phase 2 — decoder
+
+Backbone (transform + 2 encoder + fusion) **đóng băng ở chế độ eval**. Chỉ hai
+decoder được cập nhật. Nâng kích thước bằng **sub-pixel conv** (`Upsample`: conv
+mở rộng kênh ×4 cho ảnh / ×2 cho IMU rồi `pixel_shuffle`), **không** dùng nội suy
+bilinear — bilinear là bộ lọc thông thấp nên không sinh được tần số cao.
+
+| Bước | Decoder ảnh | Decoder IMU |
+|---|---|---|
+| vào | `ZI [128, 16, 16]` | `ZU [128, 8]` |
+| `shuffle2` | `[128, 32, 32]` | `[128, 16]` |
+| `up2` | `[96, 32, 32]` | `[96, 16]` |
+| `shuffle1` | `[96, 64, 64]` | `[96, 32]` |
+| `up1` | `[64, 64, 64]` | `[64, 32]` |
+| `shuffle0` | `[64, 128, 128]` | `[64, 64]` |
+| `up0` | `[32, 128, 128]` | `[32, 64]` |
+| `head` conv 3×3 | `Δ [48, 128, 128]` | `Δ [12, 64]` |
+| cộng hệ số input | `C_in + Δ` | `C_in + Δ` |
+| synthesis | `[3, 256, 256]` | `[6, 128]` |
+
+`head` được **zero-init** ở chế độ residual, nên trước khi học gì đầu ra bằng
+đúng đầu vào. Nếu lưới không chia hết cho 8, `resize` bilinear xử lý phần lẻ
+**trước** `head` — đường thoát hiểm, không phải đường nâng ảnh.
+
+### Số tham số
+
+| Khối | Tham số | Train ở phase |
+|---|---|---|
+| `image_encoder` | 753.024 | 1 |
+| `imu_encoder` | 248.832 | 1 |
+| `fusion` | 331.264 | 1 |
+| **backbone (tổng)** | **1.333.120** | 1, đóng băng ở phase 2 |
+| predictor ảnh | 66.176 | 1, rồi vứt |
+| predictor IMU | 66.176 | 1, rồi vứt |
+| decoder ảnh | 1.527.600 | neo ở 1 (vứt), lại từ đầu ở 2 |
+| decoder IMU | 328.524 | neo ở 1 (vứt), lại từ đầu ở 2 |
+| **decoder (tổng)** | **1.856.124** | 2 |
+
+Teacher EMA là bản sao của hai encoder (1.001.856 tham số) nhưng **không nhận
+gradient**, nên không tính vào đây.
+
+Thứ **duy nhất** đi từ phase 1 sang phase 2 là 1.333.120 tham số backbone. Tất cả
+predictor và decoder neo đều bị bỏ; phase 2 dựng decoder hoàn toàn mới với seed
+riêng (`decoder_initialization_seed`).
+
 ## Hai quyết định thiết kế quan trọng
 
 **Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** Với
