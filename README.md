@@ -28,31 +28,71 @@ flowchart LR
     Z --> P[Latent predictors]
     P --> L[JEPA + chống collapse + encoder sensitivity]
     T --> L
-    Z2[ZI/ZU từ backbone đã đóng băng] --> D[Decoder mới, latent-only]
-    D --> W[Hệ số tuyệt đối + inverse wavelet]
+    Z --> A[Decoder neo, hệ số tuyệt đối, bị vứt sau phase 1]
+    C --> A
+    A --> L
+    Z2[ZI/ZU từ backbone đã đóng băng] --> D[Decoder phase 2 mới]
+    D --> DZ[Δ hệ số]
+    IN[Hệ số wavelet của chính input nhiễu] --> SUM[Cộng]
+    DZ --> SUM
+    SUM --> W[Inverse wavelet]
     W --> R[Ảnh và IMU phục hồi]
 ```
 
-Phase 1 không khởi tạo hoặc gọi decoder và không có reconstruction loss. Phase
-2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi tạo
-decoder mới và chỉ tối ưu hai decoder.
+Phase 1 **có** một decoder phụ làm *neo*: nó chấm điểm latent trên hệ số wavelet
+sạch với trọng số `0.45`, rồi bị vứt bỏ khi phase 1 kết thúc. Không có neo này
+JEPA vẫn đạt loss thấp trên một latent đã ném đi tín hiệu — đó đúng là kết quả
+của lần train đầu tiên. Vẫn không có đường pixel-space trong phase 1
+(`reconstruction_loss_weight: 0.0`).
+
+Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi
+tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó.
+
+## Hai quyết định thiết kế quan trọng
+
+**Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** Với
+`input_coefficient_residual: true`, đầu ra là `C_out = C_in + Δ(Z)` và head được
+khởi tạo bằng 0, nên tại update 0 model trả lại **đúng** input. Đó là một sàn mà
+model không thể tụt xuống dưới, và `Δ` chính là phần đóng góp đo được của latent:
+ép `Δ = 0` là quay về baseline. Kiểm chứng end-to-end ở lần validate đầu tiên:
+
+| | head tuyệt đối | **residual** | baseline (không làm gì) |
+|---|---|---|---|
+| PSNR | 6.26 | **11.43** | 11.40 |
+| SSIM | 0.049 | **0.289** | 0.289 |
+| accel | 1.631 | **0.612** | 0.613 |
+
+**Decoder neo của phase 1 thì ngược lại: cố ý giữ hệ số tuyệt đối.** Cho nó dùng
+residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép được gì vào latent — phá
+đúng mục đích của neo.
 
 ## Thành phần chính
 
 - `qjepa/models/backbone.py`: QWT ảnh, Haar IMU, hai CNN encoder và gated fusion;
   trả `FI/FU/ZI/ZU`.
 - `qjepa/models/pipeline.py`: hai wrapper phase riêng. `LatentPretrainingModel`
-  không có decoder; `RestorationSystem` giữ backbone ở eval/frozen.
-- `qjepa/models/decoders.py`: chỉ nhận `ZI/ZU`, không skip, raw input hay hệ số
-  nhiễu; head dự đoán hệ số wavelet tuyệt đối.
-- `qjepa/corruptions/image.py`: blur quang học, giảm độ phân giải, exposure thấp,
-  gamma, white balance, vignette, shot/read/row noise, hot pixel, lượng tử và JPEG.
-- `qjepa/corruptions/imu.py`: bandwidth blur, scale/cross-axis error, bias drift,
-  white noise, spike, dropout và lượng tử trên toàn trajectory.
+  chỉ nhận decoder neo khi `phase1.decoder_enabled` bật, và decoder đó không đi
+  sang phase 2; `RestorationSystem` giữ backbone ở eval/frozen.
+- `qjepa/models/decoders.py`: chỉ nhận `ZI/ZU`, không skip và không raw input.
+  Upsample bằng sub-pixel conv (pixel shuffle) thay cho nội suy bilinear, vì
+  bilinear là bộ lọc thông thấp nên không sinh được tần số cao. Ở chế độ residual,
+  head zero-init và cộng vào hệ số của input.
+- `qjepa/corruptions/image.py`: blur quang học, blur chuyển động, giảm độ phân
+  giải, exposure thấp, gamma, white balance, vignette, shot/read/row noise, hot
+  pixel, lượng tử và JPEG. Mỗi frame bốc tham số riêng nên độ sáng và độ nhoè
+  thay đổi giữa các frame, không phải một hệ số cố định cho cả segment.
+- `qjepa/corruptions/imu.py`: bandwidth blur, scale/cross-axis error, white noise
+  có gain thay đổi theo thời gian, rung băng hẹp 8–45 Hz, spike, dropout và lượng
+  tử. Bias instability bị **gate** sau `wander_probability: 0.25`: phần lớn window
+  dao động *quanh* tín hiệu sạch, chỉ thỉnh thoảng mới lệch đi.
 - `qjepa/training/phase1.py`: noisy-to-clean latent prediction, teacher EMA,
   variance/covariance trên tám raw maps và finite-difference Jacobian trước fusion.
-- `qjepa/training/phase2.py`: reconstruction L1 ảnh và balanced SmoothL1
-  accel/gyro, optimizer chỉ chứa decoder.
+- `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro cân bằng, **cộng
+  thêm một số hạng riêng cho băng chi tiết** (LH/HL/HH của ảnh và nửa detail của
+  Haar IMU) với trọng số `0.5`. Lý do: L1 pixel tối ưu về trung vị có điều kiện,
+  mà với bài toán bất định như khử mờ thì trung vị đó *chính là ảnh mờ*, nên L1
+  pixel một mình không thể tạo ra nét dù latent có tốt đến đâu. Optimizer chỉ
+  chứa decoder.
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.
@@ -147,8 +187,8 @@ python3 -m qjepa preview-corruption \
 
 Panel gồm `clean | corrupted | absolute error`; file JSON cùng tên lưu toàn bộ
 tham số đã bốc. Corruption dùng seed theo sample/trajectory nên có thể tái lập.
-Thông số mặc định nhấn mạnh điều kiện tối (`exposure_gain=0.10..0.55`) và blur
-mạnh. Nên đo ảnh camera thật rồi chỉnh các khoảng trong YAML; nếu corruption mô
+Thông số mặc định nhấn mạnh điều kiện tối (`exposure_gain=0.21..0.63`,
+`tone_gamma=0.46..0.79`) và blur mạnh. Nên đo ảnh camera thật rồi chỉnh các khoảng trong YAML; nếu corruption mô
 phỏng tối hơn hoặc khác noise profile thực tế quá nhiều, model sẽ học sai domain.
 
 ## Phase 1: chỉ học latent
@@ -165,9 +205,13 @@ Checkpoint `phase1/last.pt` bắt buộc có:
 ```text
 pipeline_version = 3
 phase = latent_pretrain
-trained_with_reconstruction = false
-phase1_decoder_forward_calls = 0
+trained_with_reconstruction = <true khi bat neo, false khi tat>
+phase1_decoder_forward_calls = <so lan decoder neo chay>
 ```
+
+Hai trường cuối không còn bị ép về `false/0`, nhưng **phải nhất quán với nhau**:
+`trained_with_reconstruction` đúng khi và chỉ khi decoder đã chạy ít nhất một
+lần. Metadata không được phép nói dối về việc phase 1 đã dùng decoder hay chưa.
 
 Batch phase 1 phải là B≥8 thật. Gradient accumulation không được dùng để giả lập
 batch statistics cho variance/covariance. Trước khi phase 2 được phép chạy,
@@ -191,6 +235,18 @@ python3 -m qjepa train-phase2 \
 
 Lệnh từ chối checkpoint phase 1 sai provenance hoặc manifest hash không khớp.
 Hai output là `phase2/last.pt` và `phase2/best_joint_validation.pt`.
+
+Mỗi checkpoint in một dòng so sánh trực tiếp với baseline "không làm gì":
+
+```text
+validation update=250 | PSNR 11.43 vs 11.40 | SSIM 0.289 vs 0.289 | accel 0.612 vs 0.613 | VUOT baseline
+```
+
+Vì head zero-init, dòng validate **đầu tiên** đã phải là `VUOT baseline`. Nếu nó
+báo `chua vuot` ngay lần đầu thì residual chưa thực sự bật — kiểm
+`phase2.input_coefficient_residual` và `phase2.output_coefficients` trong config
+đang dùng. `validate_config` từ chối config mà hai trường này mâu thuẫn nhau, nên
+file không thể mô tả sai việc decoder đang làm gì.
 
 ## Đánh giá và inference
 
@@ -233,6 +289,31 @@ env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
 Biến môi trường ở lệnh pytest chỉ tránh plugin ROS được cài toàn hệ thống tự nạp;
 test của project không phụ thuộc ROS.
 
+## Kết quả đã đo được
+
+Đo trên TartanAir V2, split test, so với baseline "đưa thẳng input nhiễu ra":
+
+| Cấu hình | Probe tuyến tính (IMU / ảnh) | PSNR | Baseline |
+|---|---|---|---|
+| Không neo phase 1 | 17% / 25% | thua baseline ở cả bốn metric | — |
+| Neo `0.30`, head tuyệt đối | 43% / 49% | 17.87 | 16.56 |
+| Neo `0.45`, head residual | *chưa train lại* | — | — |
+
+**Probe tuyến tính** là hồi quy ridge từ latent đã đóng băng về mục tiêu sạch. Nó
+là *cận dưới* của lượng thông tin rút được từ latent, và là chỉ số cho biết neo
+có tác dụng hay không, độc lập với chất lượng decoder.
+
+Giới hạn còn lại, đo bằng protocol 10 kịch bản: đầu ra của cấu hình "neo 0.30,
+head tuyệt đối" **gần như độc lập với đầu vào** — input trải 107.4 dB PSNR thì
+output chỉ nhúc nhích 1.94 dB, và một input gần sạch bị phá (`blur_only` vào
+37.5 dB, ra 15.7 dB). Đó chính là lý do có residual. Nút thắt **không** nằm ở
+decoder: decoder đã rút được 62–74% trong khi probe tuyến tính chỉ rút 43%, nên
+thêm ResNet hay pointwise vào decoder không giải quyết được gì — giới hạn là số
+chiều của `ZI`, mỗi ô latent phủ một khối 16×16 pixel.
+
+Chưa làm: `encoder_skips` vẫn bị ghim `false` (chưa cài, và `encoders.py` cố ý
+không trả feature trung gian), latent đa tỉ lệ, và adversarial loss.
+
 ## Giới hạn dữ liệu
 
 JEPA teacher phase 1 và reconstruction loss phase 2 đều cần reference sạch trong
@@ -241,4 +322,3 @@ train. Ảnh từ camera kém chỉ dùng làm input deployment; nếu tập hu�
 đủ thông tin để học target sạch. TartanAir clean có thể làm reference ban đầu,
 nhưng cần fine-tune hoặc hiệu chỉnh corruption bằng dữ liệu camera thật để giảm
 domain gap.
-# qwt_jepa_ver3
