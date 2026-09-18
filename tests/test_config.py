@@ -14,6 +14,19 @@ def test_main_config_enforces_real_batch_eight():
         validate_config(bad)
 
 
+def test_phase2_rejects_negative_variation_weight_and_non_positive_beta():
+    config = load_config("configs/pipeline_v3.yaml")
+    for key, value in (
+        ("imu_variation_weight", -0.1),
+        ("smooth_l1_beta", 0.0),
+        ("smooth_l1_beta", -1.0),
+    ):
+        bad = copy.deepcopy(config)
+        bad["phase2"][key] = value
+        with pytest.raises(ValueError, match=key):
+            validate_config(bad)
+
+
 def test_phase_contracts_reject_unimplemented_paths_and_lying_config():
     config = load_config("configs/smoke.yaml")
     for section, key, value in (

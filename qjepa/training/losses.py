@@ -78,6 +78,21 @@ def detail_band_l1(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> t
     return F.l1_loss(predicted[:, half:], target[:, half:])
 
 
+def first_difference_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """L1 tren sai phan bac mot doc truc thoi gian — tuc do rung.
+
+    Cac so hang con lai cham diem tung mau doc lap, nen mot du doan bam dung bien
+    do van co the giat tung mau mot ma khong bi phat gi. Day chinh la dai luong
+    ma evaluate goi la variation_rmse: truoc day no duoc DO nhung khong duoc
+    TOI UU, va do lieu cho thay no gan nhu khong nhuc nhich (-0,7% so voi input).
+    """
+    if predicted.shape != target.shape:
+        raise ValueError(f"IMU {tuple(predicted.shape)} != {tuple(target.shape)}")
+    if predicted.shape[-1] < 2:
+        raise ValueError("Need at least two samples along time for a first difference")
+    return F.l1_loss(predicted.diff(dim=-1), target.diff(dim=-1))
+
+
 def phase2_reconstruction_loss(
     image_restored: torch.Tensor,
     image_clean: torch.Tensor,
@@ -89,6 +104,7 @@ def phase2_reconstruction_loss(
     imu_coefficients: torch.Tensor | None = None,
     imu_coefficient_target: torch.Tensor | None = None,
     detail_weight: float = 0.0,
+    variation_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     image = F.l1_loss(image_restored, image_clean)
     accel = F.smooth_l1_loss(
@@ -107,6 +123,16 @@ def phase2_reconstruction_loss(
         total = total + detail_weight * (image_detail + 0.5 * imu_detail)
         parts["image_detail_l1"] = image_detail
         parts["imu_detail_l1"] = imu_detail
+    if variation_weight > 0:
+        accel_variation = first_difference_l1(
+            imu_restored_normalized[:, :3], imu_clean_normalized[:, :3]
+        )
+        gyro_variation = first_difference_l1(
+            imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:]
+        )
+        total = total + variation_weight * (accel_variation + gyro_variation)
+        parts["imu_accel_variation_l1"] = accel_variation
+        parts["imu_gyro_variation_l1"] = gyro_variation
     return total, parts
 
 

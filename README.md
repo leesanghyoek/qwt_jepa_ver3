@@ -139,7 +139,7 @@ flowchart TB
     SU["Haar synthesis"]
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
-    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro<br/>+ băng chi tiết LH/HL/HH · 0,5"])
+    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5"])
     ZI --> DI --> HI --> PI --> SI --> OI --> L1
     ZU --> DU --> HU --> PU --> SU --> OU --> L1
     CI -. "không qua trọng số nào" .-> PI
@@ -352,12 +352,14 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
   dao động *quanh* tín hiệu sạch, chỉ thỉnh thoảng mới lệch đi.
 - `qjepa/training/phase1.py`: noisy-to-clean latent prediction, teacher EMA,
   variance/covariance trên tám raw maps và finite-difference Jacobian trước fusion.
-- `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro cân bằng, **cộng
-  thêm một số hạng riêng cho băng chi tiết** (LH/HL/HH của ảnh và nửa detail của
-  Haar IMU) với trọng số `0.5`. Lý do: L1 pixel tối ưu về trung vị có điều kiện,
-  mà với bài toán bất định như khử mờ thì trung vị đó *chính là ảnh mờ*, nên L1
-  pixel một mình không thể tạo ra nét dù latent có tốt đến đâu. Optimizer chỉ
-  chứa decoder.
+- `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro, cộng hai số hạng
+  tần số cao. **Băng chi tiết** (LH/HL/HH của ảnh và nửa detail của Haar IMU,
+  trọng số `2.0`) vì L1 pixel tối ưu về trung vị có điều kiện, mà với bài toán
+  bất định như khử mờ thì trung vị đó *chính là ảnh mờ*. **Sai phân bậc một của
+  IMU** (`imu_variation_weight: 0.5`) vì mọi số hạng khác chấm điểm từng mẫu độc
+  lập, nên tín hiệu giật từng mẫu không bị phạt. `smooth_l1_beta: 0.05` giữ sai
+  số IMU (`|x| ≈ 0,12`) trong vùng tuyến tính; ở `1.0` gradient yếu gấp 8 lần.
+  Optimizer chỉ chứa decoder.
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.

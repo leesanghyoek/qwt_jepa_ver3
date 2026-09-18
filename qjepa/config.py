@@ -126,6 +126,10 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     if phase2.get("reconstruction_detail_weight", 0.0) < 0:
         raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
+    if phase2.get("imu_variation_weight", 0.0) < 0:
+        raise ValueError("phase2.imu_variation_weight cannot be negative")
+    if phase2.get("smooth_l1_beta", 0.0) <= 0:
+        raise ValueError("phase2.smooth_l1_beta must be positive")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
         raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
     if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":

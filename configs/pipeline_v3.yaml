@@ -165,6 +165,11 @@ phase2:
   warmup_updates: 250
   minimum_lr: 0.000001
   gradient_clip_norm: 5.0
-  reconstruction_detail_weight: 0.5   # phat rieng bang LH/HL/HH va Haar detail
-  smooth_l1_beta: 1.0
+  reconstruction_detail_weight: 2.0   # phat rieng bang LH/HL/HH va Haar detail
+  # Sai so IMU da chuan hoa do duoc la ~0,12-0,14. Voi beta=1.0 toan bo qua trinh
+  # train nam trong vung BAC HAI cua SmoothL1, noi gradient = |x|/beta = 0,125 —
+  # yeu gap 8 lan L1, va mat luon tinh ben voi spike ma SmoothL1 sinh ra de co.
+  smooth_l1_beta: 0.05
+  # Phat trên sai phan bac mot: dai luong duy nhat trong bao cao noi ve do MUOT.
+  imu_variation_weight: 0.5
   precision: fp32

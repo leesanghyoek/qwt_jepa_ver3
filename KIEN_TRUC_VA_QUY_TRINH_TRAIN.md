@@ -266,7 +266,7 @@ chuẩn hóa feature; chưa có gain raw riêng.
 | Precision | FP32 | FP32 |
 | Teacher EMA | 0,99 → 0,999 | không dùng |
 | Sensitivity | off 500 updates, ramp 1.000 tới `1e-4` | không dùng |
-| Neo reconstruction | hệ số `0,45`, detail `0,5` | detail `0,5` trên băng LH/HL/HH |
+| Neo reconstruction | hệ số `0,45`, detail `0,5` | detail `2,0`, sai phân `0,5`, β `0,05` |
 
 ## 6. Kiểm tra latent và chuyển phase
 
@@ -358,16 +358,30 @@ transform là metadata shape, không chứa tín hiệu.
 
 ```text
 L_phase2 = L1(image_raw_restored, image_clean)
-           + 0.5 × [SmoothL1(accel_norm_restored, accel_norm_clean)
-                    + SmoothL1(gyro_norm_restored, gyro_norm_clean)]
-           + 0.5 × [L1(hệ số ảnh băng LH/HL/HH)
+           + 0.5 × [SmoothL1_β(accel_norm_restored, accel_norm_clean)
+                    + SmoothL1_β(gyro_norm_restored, gyro_norm_clean)]
+           + 2.0 × [L1(hệ số ảnh băng LH/HL/HH)
                     + 0.5 × L1(hệ số IMU băng detail)]
+           + 0.5 × [L1(Δt accel_norm_restored, Δt accel_norm_clean)
+                    + L1(Δt gyro_norm_restored, Δt gyro_norm_clean)]
 ```
 
-Số hạng cuối (`reconstruction_detail_weight: 0.5`) phạt riêng phần đường nét bị
-mất. L1 trên pixel tối ưu về trung vị có điều kiện, mà với bài toán bất định như
-khử mờ thì nghiệm đó **chính là ảnh mờ** — nên cần một số hạng nhắm thẳng vào
-băng chi tiết.
+**Băng chi tiết (`reconstruction_detail_weight: 2.0`)** phạt riêng phần đường nét
+bị mất. L1 trên pixel tối ưu về trung vị có điều kiện, mà với bài toán bất định
+như khử mờ thì nghiệm đó **chính là ảnh mờ** — nên cần một số hạng nhắm thẳng vào
+băng chi tiết. Trọng số đi từ 0,5 lên 2,0 sau khi đo thấy MAE giảm 45,5% mà SSIM
+chỉ tăng 10,7%: dấu hiệu model đang chỉnh phơi sáng chứ chưa dựng lại cấu trúc.
+
+**Sai phân bậc một (`imu_variation_weight: 0.5`)** là số hạng duy nhất nói về độ
+*mượt*. Các số hạng khác chấm điểm từng mẫu độc lập, nên một dự đoán bám đúng
+biên độ vẫn có thể giật từng mẫu mà không bị phạt. `evaluate` vốn đã báo cáo đại
+lượng này dưới tên `variation_rmse` — nó được **đo** nhưng không được **tối ưu**,
+và số liệu cho thấy nó gần như không nhúc nhích (−0,7% so với input).
+
+**`smooth_l1_beta: 0.05`**, hạ từ `1.0`. Sai số IMU đã chuẩn hoá đo được là
+`|x| ≈ 0,12–0,14`; với `β = 1.0` toàn bộ quá trình train nằm trong vùng **bậc
+hai** của SmoothL1, nơi gradient bằng `|x|/β ≈ 0,125` — yếu gấp 8 lần L1, và mất
+luôn phần đuôi L1 vốn là lý do dùng SmoothL1 để bền với spike.
 
 Không clamp ảnh trước loss train. Clamp chỉ khi tính image metrics/hiển thị/xuất
 PNG. IMU loss dùng normalized để cân bằng scale; chỉ số cuối dùng đơn vị vật lý.
