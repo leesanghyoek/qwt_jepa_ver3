@@ -186,6 +186,12 @@ class _Jsonl:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _progress(update: int, maximum: int) -> str:
+    """Tien do dang 1340/10000 13%, canh phai de log thang cot khi cuon."""
+    width = len(str(maximum))
+    return f"{update:>{width}}/{maximum} {100.0 * update / max(1, maximum):>3.0f}%"
+
+
 def _memory_mib() -> dict[str, float]:
     """RSS hien tai cua tien trinh train va cac worker con.
 
@@ -561,7 +567,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             anchor = f" recon={metrics['reconstruction']:.6f}" if "reconstruction" in metrics else ""
             print(
-                f"phase1 update={update} loss={metrics['loss']:.6f}"
+                f"phase1 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
                 f" jepa={metrics['jepa']:.6f}{anchor}"
             )
         if update % checkpoint_every == 0 or update == maximum:
@@ -584,7 +590,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 }
             )
             print(
-                f"  gate update={update} {gate_status}"
+                f"  gate update={_progress(update, maximum)} {gate_status}"
                 f" | RSS {memory['rss_mib']:.0f} MiB"
                 f" + worker {memory['children_rss_mib']:.0f} MiB"
             )
@@ -708,7 +714,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
-                f"phase2 update={update} loss={metrics['loss']:.6f}"
+                f"phase2 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
                 f" image_l1={metrics['image_l1']:.6f}"
             )
         if update % checkpoint_every == 0 or update == maximum:
@@ -734,7 +740,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 and validation["validation_accel_rmse"] < validation["validation_baseline_accel_rmse"]
             )
             print(
-                f"  validation update={update}"
+                f"  validation update={_progress(update, maximum)}"
                 f" | PSNR {validation['validation_image_psnr_db']:.2f}"
                 f" vs {validation['validation_baseline_image_psnr_db']:.2f}"
                 f" | SSIM {validation['validation_image_ssim']:.3f}"
