@@ -102,7 +102,7 @@ flowchart TB
     JE(["<b>JEPA loss</b> · trọng số 1,0<br/>online nhiễu ≈ teacher sạch"])
     VC(["<b>Variance 1,0 + Covariance 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch"])
     JA(["<b>Encoder sensitivity</b> Jacobian<br/>Hutchinson + Rademacher<br/>bật sau update 500 · ramp 1000"])
-    ANL(["<b>Anchor loss · 0,45</b><br/>+ băng chi tiết 0,5"])
+    ANL(["<b>Anchor loss · 0,45</b><br/>+ băng chi tiết 2,0"])
     CLEAN --> TE --> JE
     Z --> PR --> JE
     Z --> AN --> ANL
@@ -292,16 +292,24 @@ bilinear — bilinear là bộ lọc thông thấp nên không sinh được t�
 | vào | `ZI [128, 16, 16]` | `ZU [128, 8]` |
 | `shuffle2` | `[128, 32, 32]` | `[128, 16]` |
 | `up2` | `[96, 32, 32]` | `[96, 16]` |
+| **`merge2`** skip có cổng | `+ [96, 32, 32]` từ encoder | `+ [96, 16]` |
 | `shuffle1` | `[96, 64, 64]` | `[96, 32]` |
 | `up1` | `[64, 64, 64]` | `[64, 32]` |
+| **`merge1`** skip có cổng | `+ [64, 64, 64]` từ encoder | `+ [64, 32]` |
 | `shuffle0` | `[64, 128, 128]` | `[64, 64]` |
 | `up0` | `[32, 128, 128]` | `[32, 64]` |
+| **`merge0`** skip có cổng | `+ [32, 128, 128]` từ encoder | `+ [32, 64]` |
 | `head` conv 3×3 | `Δ [48, 128, 128]` | `Δ [12, 64]` |
 | cộng hệ số input | `C_in + Δ` | `C_in + Δ` |
 | synthesis | `[3, 256, 256]` | `[6, 128]` |
 
+Ba khối `merge*` dùng `x + sigmoid(conv_gate(x)) × conv_skip(skip)`: cổng sinh từ
+**đường latent** nên nó đổi theo từng vị trí và từng kênh — latent quyết định cho
+bao nhiêu skip đi qua. `conv_skip` zero-init nên đóng góp ban đầu bằng đúng 0.
+
 `head` được **zero-init** ở chế độ residual, nên trước khi học gì đầu ra bằng
-đúng đầu vào. Nếu lưới không chia hết cho 8, `resize` bilinear xử lý phần lẻ
+đúng đầu vào — và sàn identity đó **sống sót qua cả ba điểm nối** (đo được: lệch
+tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia hết cho 8, `resize` bilinear xử lý phần lẻ
 **trước** `head` — đường thoát hiểm, không phải đường nâng ảnh.
 
 ### Số tham số
@@ -314,9 +322,14 @@ bilinear — bilinear là bộ lọc thông thấp nên không sinh được t�
 | **backbone (tổng)** | **1.333.120** | 1, đóng băng ở phase 2 |
 | predictor ảnh | 66.176 | 1, rồi vứt |
 | predictor IMU | 66.176 | 1, rồi vứt |
-| decoder ảnh | 1.527.600 | neo ở 1 (vứt), lại từ đầu ở 2 |
-| decoder IMU | 328.524 | neo ở 1 (vứt), lại từ đầu ở 2 |
-| **decoder (tổng)** | **1.856.124** | 2 |
+| decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
+| decoder ảnh phase 2 | 1.556.656 | 2 |
+| decoder IMU phase 2 | 357.580 | 2 |
+| **decoder phase 2 (tổng)** | **1.914.236** | 2 |
+
+Chênh lệch 58.112 tham số giữa decoder phase 2 và decoder neo là sáu khối
+`SkipMerge` (ba cho ảnh, ba cho IMU). Decoder neo giữ nguyên kiến trúc cũ vì
+skip và residual đều là đường vòng quanh latent.
 
 Teacher EMA là bản sao của hai encoder (1.001.856 tham số) nhưng **không nhận
 gradient**, nên không tính vào đây.

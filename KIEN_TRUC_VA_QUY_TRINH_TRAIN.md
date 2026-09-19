@@ -202,7 +202,8 @@ tính chỉ rút được 17% tín hiệu IMU.
 
 Vì vậy phase 1 có thêm một decoder phụ và số hạng L1 với **hệ số clean thật**:
 `coefficient_reconstruction_loss_weight` (0,45) và `reconstruction_detail_weight`
-(0,5, cân thêm cho băng LH/HL/HH và Haar detail). Đây là số hạng duy nhất không
+(2,0, cân thêm cho băng LH/HL/HH và Haar detail — bằng phase 2, vì trước đây neo
+chấm điểm đường nét nhẹ gấp bốn lần mức decoder bị đòi hỏi). Đây là số hạng duy nhất không
 tự quy chiếu nên không thể thoả mãn bằng cách vứt tín hiệu.
 
 Decoder phụ dùng đúng `build_decoders`, tức đúng kiến trúc phase 2 sẽ dùng, để
@@ -268,7 +269,7 @@ chuẩn hóa feature; chưa có gain raw riêng.
 | Precision | FP32 | FP32 |
 | Teacher EMA | 0,99 → 0,999 | không dùng |
 | Sensitivity | off 500 updates, ramp 1.000 tới `1e-4` | không dùng |
-| Neo reconstruction | hệ số `0,45`, detail `0,5` | detail `2,0`, sai phân `0,5`, β `0,05` |
+| Neo reconstruction | hệ số `0,45`, detail `2,0` | detail `2,0`, sai phân `0,5`, β `0,05` |
 
 ## 6. Kiểm tra latent và chuyển phase
 
