@@ -139,7 +139,7 @@ flowchart TB
     SU["Haar synthesis"]
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
-    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5"])
+    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5<br/>+ khớp năng lượng đường nét · 1,0"])
     SK["<b>3 tầng encoder</b> · skip<br/>96×32×32 · 64×64×64 · 32×128×128<br/>đường nét của ảnh NHIỄU: sắc nhưng chưa đáng tin"]
     GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)<br/>bias −2 ⇒ ban đầu gần như đóng"}}
     ZI --> DI --> HI --> PI --> SI --> OI --> L1

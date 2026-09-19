@@ -421,6 +421,20 @@ hề thưởng việc không làm gì — model đang bỏ lỡ một món lợi
 với tới. Và trên bài co giãn wavelet (đúng nghĩa khử nhiễu), head cũ giảm được
 **0%** còn head mới giảm **100%**.
 
+**Khớp năng lượng đường nét (`detail_energy_weight: 1.0`)** cấm lối thoát "làm
+phẳng cho an toàn". L1 trên từng hệ số có trung vị bằng 0, nên ngay khi
+`residual_sees_input` cho decoder quyền chạm vào băng chi tiết, nó chọn **co nhỏ**
+chúng — đo được: `Δ/in` ở LH nhảy từ 4,3% lên 69,8% và khoảng cách tới sạch
+**xấu đi** (0,06942 → 0,07132), còn HH thì tốt lên vì băng đó gần như toàn nhiễu.
+
+Số hạng này đòi **tổng năng lượng** băng chi tiết bằng ảnh sạch, tính riêng từng
+băng. Co nhỏ vi phạm trực tiếp, bất kể từng hệ số đúng hay sai. Nó là khớp mô-men
+chứ không phải đối kháng: không cần mạng thứ hai, không có rủi ro mất cân bằng.
+Khuếch đại quá mức **cũng bị phạt**, nên không lách được bằng cách thổi phồng nhiễu.
+
+Hướng cần đi là *tăng*: `delta_report` cho thấy ảnh mờ thiếu năng lượng đường nét
+ở cả ba băng so với ảnh sạch — mờ đã xoá mất chúng.
+
 **Băng chi tiết (`reconstruction_detail_weight: 2.0`)** phạt riêng phần đường nét
 bị mất. L1 trên pixel tối ưu về trung vị có điều kiện, mà với bài toán bất định
 như khử mờ thì nghiệm đó **chính là ảnh mờ** — nên cần một số hạng nhắm thẳng vào

@@ -60,22 +60,53 @@ def variance_covariance_loss(
     return variance_loss, covariance_loss
 
 
-def detail_band_l1(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> torch.Tensor:
-    """L1 tren rieng cac bang chi tiet — tuc duong net.
+def detail_bands(coefficients: torch.Tensor, dim: int) -> torch.Tensor:
+    """Tach rieng phan chi tiet — tuc duong net.
 
     QWT xep he so thanh [mau, bang, thanh phan] roi dep thanh 48 kenh; bang 0 la
     LL con bang 1..3 la LH/HL/HH. Haar cho IMU xep approx truoc, detail sau.
+    Tra ve [B, bang, ...] de goi ben ngoai gop theo bang khi can.
+    """
+    if dim != 2:
+        half = coefficients.shape[1] // 2
+        return coefficients[:, half:]
+    batch, channels, height, width = coefficients.shape
+    if channels % 16:
+        raise ValueError(f"Expected 16 bands*components per colour, got {channels}")
+    shape = (batch, channels // 16, 4, 4, height, width)
+    # [B, mau, bang, thanh phan, H, W] -> dua truc BANG len truoc de gop rieng.
+    return coefficients.reshape(shape)[:, :, 1:].transpose(1, 2)
+
+
+def detail_band_l1(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> torch.Tensor:
+    if predicted.shape != target.shape:
+        raise ValueError(f"Coefficients {tuple(predicted.shape)} != {tuple(target.shape)}")
+    return F.l1_loss(detail_bands(predicted, dim), detail_bands(target, dim))
+
+
+def detail_energy_gap(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> torch.Tensor:
+    """Lech nang luong duong net, tinh theo tung bang.
+
+    L1 tren tung he so noi "moi he so phai gan dung", va trung vi co dieu kien cua
+    no la 0 — nen khi duoc phep cham vao bang chi tiet, model chon CO NHO he so:
+    o cho co the co canh, co ve 0 giam sai so chac chan, giu canh thi rui ro. Do
+    dung la hanh vi delta_report do duoc (LH/HL te di sau khi model bat dau cham
+    vao chung).
+
+    So hang nay noi mot dieu khac han: TONG nang luong duong net phai bang anh
+    sach. Co nho vi pham truc tiep, bat ke tung he so dung hay sai. No la khop
+    mo-men chu khong phai doi khang — khong can mang thu hai, khong co rui ro mat
+    can bang.
+
+    Khong dam bao net DUNG CHO. No chi cam loi thoat "lam phang cho an toan".
     """
     if predicted.shape != target.shape:
         raise ValueError(f"Coefficients {tuple(predicted.shape)} != {tuple(target.shape)}")
-    if dim == 2:
-        batch, channels, height, width = predicted.shape
-        if channels % 16:
-            raise ValueError(f"Expected 16 bands*components per colour, got {channels}")
-        shape = (batch, channels // 16, 4, 4, height, width)
-        return F.l1_loss(predicted.reshape(shape)[:, :, 1:], target.reshape(shape)[:, :, 1:])
-    half = predicted.shape[1] // 2
-    return F.l1_loss(predicted[:, half:], target[:, half:])
+    got, want = detail_bands(predicted, dim), detail_bands(target, dim)
+    # Gop moi truc tru batch va bang: moi bang co mot nang luong rieng, va LH/HL
+    # hanh xu khac HH nen khong duoc tron chung.
+    axes = tuple(range(2, got.ndim))
+    return (got.square().mean(axes).sqrt() - want.square().mean(axes).sqrt()).abs().mean()
 
 
 def first_difference_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -105,6 +136,7 @@ def phase2_reconstruction_loss(
     imu_coefficient_target: torch.Tensor | None = None,
     detail_weight: float = 0.0,
     variation_weight: float = 0.0,
+    detail_energy_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     image = F.l1_loss(image_restored, image_clean)
     accel = F.smooth_l1_loss(
@@ -123,6 +155,12 @@ def phase2_reconstruction_loss(
         total = total + detail_weight * (image_detail + 0.5 * imu_detail)
         parts["image_detail_l1"] = image_detail
         parts["imu_detail_l1"] = imu_detail
+    if detail_energy_weight > 0 and image_coefficients is not None:
+        image_energy = detail_energy_gap(image_coefficients, image_coefficient_target, dim=2)
+        imu_energy = detail_energy_gap(imu_coefficients, imu_coefficient_target, dim=1)
+        total = total + detail_energy_weight * (image_energy + 0.5 * imu_energy)
+        parts["image_detail_energy"] = image_energy
+        parts["imu_detail_energy"] = imu_energy
     if variation_weight > 0:
         accel_variation = first_difference_l1(
             imu_restored_normalized[:, :3], imu_clean_normalized[:, :3]

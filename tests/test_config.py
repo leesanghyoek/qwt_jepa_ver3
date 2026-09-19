@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from qjepa.cli import _latent_gate
-from qjepa.config import load_config, validate_config
+from qjepa.config import build_decoders, load_config, validate_config
 
 
 def test_main_config_enforces_real_batch_eight():
@@ -86,3 +86,21 @@ def test_encoder_skips_requires_an_explicit_merge_kind():
     without["phase2"]["decoder_input"] = "fused_dense_latent_only"
     del without["phase2"]["skip_gating"]
     validate_config(without)
+
+
+def test_old_checkpoint_config_without_the_new_keys_rebuilds_the_old_architecture():
+    """build_decoders cung doc config nam TRONG checkpoint.
+
+    Checkpoint train truoc khi khoa ra doi khong co no, va y nghia dung cua
+    'khong co' la kien truc truoc do. Neu tra khoa bang [...] thi moi checkpoint
+    cu deu nap that bai bang KeyError thay vi mot thong bao ro rang.
+    """
+    config = copy.deepcopy(load_config("configs/pipeline_v3.yaml"))
+    for key in ("residual_sees_input", "skip_gating", "encoder_skips"):
+        config["phase2"].pop(key, None)
+    config["phase2"]["decoder_input"] = "fused_dense_latent_only"
+    decoders = build_decoders(config)
+    assert decoders.image.sees_input is False
+    assert decoders.uses_skips is False
+    # Va head phai co dung so kenh cua kien truc cu, neu khong state_dict lech.
+    assert decoders.image.head.in_channels == config["model"]["encoder_channels"][0]

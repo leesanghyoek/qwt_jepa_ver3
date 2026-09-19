@@ -187,4 +187,10 @@ phase2:
   smooth_l1_beta: 0.05
   # Phat trên sai phan bac mot: dai luong duy nhat trong bao cao noi ve do MUOT.
   imu_variation_weight: 0.5
+  # L1 tren tung he so co trung vi bang 0, nen khi duoc phep cham vao bang chi tiet
+  # model chon CO NHO chung — do dung la hanh vi do duoc: LH/HL te di sau khi
+  # residual_sees_input cho no quyen cham vao. So hang nay doi TONG nang luong
+  # duong net phai bang anh sach, nen co nho vi pham truc tiep. Khop mo-men, khong
+  # phai doi khang: khong can mang thu hai, khong co rui ro mat can bang.
+  detail_energy_weight: 1.0
   precision: fp32

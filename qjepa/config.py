@@ -145,6 +145,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
     if phase2.get("imu_variation_weight", 0.0) < 0:
         raise ValueError("phase2.imu_variation_weight cannot be negative")
+    if phase2.get("detail_energy_weight", 0.0) < 0:
+        raise ValueError("phase2.detail_energy_weight cannot be negative")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
@@ -223,8 +225,13 @@ def build_decoders(
         residual=residual,
         # Thu tu tu tho den min, khop voi thu tu encoder tra ve.
         skip_channels=(channels[2], channels[1], channels[0]) if skips else None,
-        skip_gating=bool(config["phase2"]["skip_gating"]) if skips else True,
-        sees_input=bool(config["phase2"]["residual_sees_input"]) if residual else False,
+        # .get chu khong phai [...]: ham nay cung doc config NAM TRONG checkpoint,
+        # va checkpoint train truoc khi khoa ra doi thi khong co no. "Khong co"
+        # nghia la kien truc truoc do, tuc False — dung gia tri tai tao lai dung
+        # mang da train. validate_config van bat khai tuong minh cho config MOI,
+        # nen khong co duong nao doi kien truc am tham.
+        skip_gating=bool(config["phase2"].get("skip_gating", False)) if skips else True,
+        sees_input=bool(config["phase2"].get("residual_sees_input", False)) if residual else False,
     )
 
 

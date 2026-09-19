@@ -97,6 +97,7 @@ class Phase2Trainer:
                 imu_coefficient_target=imu_target,
                 detail_weight=detail_weight,
                 variation_weight=float(self.phase.get("imu_variation_weight", 0.0)),
+                detail_energy_weight=float(self.phase.get("detail_energy_weight", 0.0)),
             )
             loss = self.phase["reconstruction_loss_weight"] * loss
             (loss / expected).backward()

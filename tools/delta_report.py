@@ -61,6 +61,7 @@ def main() -> None:
 
     # Tong binh phuong tich luy, chia ra o cuoi — tranh giu tensor cua moi batch.
     image_in = np.zeros(4)
+    image_clean_rms = np.zeros(4)   # nang luong cua anh SACH: dich that su
     image_delta = np.zeros(4)
     image_gap_in = np.zeros(4)      # |C_in - C_clean| : sai so cua viec khong lam gi
     image_gap_out = np.zeros(4)     # |C_out - C_clean| : sai so sau khi sua
@@ -86,6 +87,7 @@ def main() -> None:
             b = c_out.reshape(shape)[:, :, band]
             t = clean_image.reshape(shape)[:, :, band]
             image_in[band] += rms(a) ** 2
+            image_clean_rms[band] += rms(t) ** 2
             image_delta[band] += rms(b - a) ** 2
             image_gap_in[band] += rms(a - t) ** 2
             image_gap_out[band] += rms(b - t) ** 2
@@ -104,18 +106,26 @@ def main() -> None:
         raise SystemExit("Loader khong tra ve batch nao.")
     root = lambda total: np.sqrt(np.asarray(total) / seen)
     image_in, image_delta = root(image_in), root(image_delta)
+    image_clean_rms = root(image_clean_rms)
     image_gap_in, image_gap_out = root(image_gap_in), root(image_gap_out)
 
     print(f"\nmau: {seen} batch x {config['phase2']['batch_size']}\n")
     print("ANH — he so QWT theo bang")
-    print(f"  {'bang':<24}{'RMS(C_in)':>11}{'RMS(delta)':>12}{'delta/in':>10}"
-          f"{'|C_in-sach|':>13}{'|C_out-sach|':>14}{'':>6}")
+    print(f"  {'bang':<24}{'RMS(C_in)':>11}{'RMS(sach)':>11}{'RMS(delta)':>12}"
+          f"{'delta/in':>10}{'|C_in-sach|':>13}{'|C_out-sach|':>14}{'':>6}")
     for band in range(4):
         share = image_delta[band] / max(image_in[band], 1e-12)
         better = image_gap_out[band] < image_gap_in[band]
-        print(f"  {BANDS[band]:<24}{image_in[band]:>11.5f}{image_delta[band]:>12.5f}"
-              f"{100 * share:>9.1f}%{image_gap_in[band]:>13.5f}{image_gap_out[band]:>14.5f}"
+        print(f"  {BANDS[band]:<24}{image_in[band]:>11.5f}{image_clean_rms[band]:>11.5f}"
+              f"{image_delta[band]:>12.5f}{100 * share:>9.1f}%"
+              f"{image_gap_in[band]:>13.5f}{image_gap_out[band]:>14.5f}"
               f"{'   tot hon' if better else '   TE HON'}")
+    # RMS(sach) > RMS(C_in) o bang chi tiet nghia la mo da XOA nang luong duong
+    # net, tuc huong dung la TANG. Neu model dang co nho, no di nguoc chieu.
+    thieu = image_clean_rms[1:] > image_in[1:]
+    if thieu.any():
+        print(f"\n  Anh mo THIEU nang luong duong net o {int(thieu.sum())}/3 bang"
+              f" -> huong dung la TANG, khong phai co nho.")
 
     detail_out_gap = np.sqrt(np.square(image_gap_out[1:]).mean())
     detail_in_gap = np.sqrt(np.square(image_gap_in[1:]).mean())
