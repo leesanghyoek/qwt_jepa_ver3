@@ -673,11 +673,6 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         trainer.assert_backbone_frozen()
         trainer.decoder_initialization_hash = payload["metadata"]["decoder_initialization_hash"]
         trainer.optimizer.load_state_dict(payload["optimizer"])
-        if trainer.discriminator is not None:
-            if "discriminator" not in payload:
-                raise ValueError("Resume checkpoint has no discriminator but the config enables one")
-            trainer.discriminator.load_state_dict(payload["discriminator"], strict=True)
-            trainer.discriminator_optimizer.load_state_dict(payload["discriminator_optimizer"])
         trainer.successful_updates = int(payload["successful_updates"])
         expected_microbatches = trainer.successful_updates * config["phase2"]["gradient_accumulation"]
         if payload["metadata"].get("data_microbatches_consumed") != expected_microbatches:

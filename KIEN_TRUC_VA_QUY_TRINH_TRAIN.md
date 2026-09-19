@@ -364,9 +364,6 @@ L_phase2 = L1(image_raw_restored, image_clean)
                     + 0.5 × L1(hệ số IMU băng detail)]
            + 0.5 × [L1(Δt accel_norm_restored, Δt accel_norm_clean)
                     + L1(Δt gyro_norm_restored, Δt gyro_norm_clean)]
-           + w(update) × (−mean D(image_restored))        ← đối kháng
-
-D học riêng:  mean relu(1 − D(sạch)) + mean relu(1 + D(khôi phục))
 ```
 
 **Băng chi tiết (`reconstruction_detail_weight: 2.0`)** phạt riêng phần đường nét
@@ -380,26 +377,6 @@ chỉ tăng 10,7%: dấu hiệu model đang chỉnh phơi sáng chứ chưa dự
 biên độ vẫn có thể giật từng mẫu mà không bị phạt. `evaluate` vốn đã báo cáo đại
 lượng này dưới tên `variation_rmse` — nó được **đo** nhưng không được **tối ưu**,
 và số liệu cho thấy nó gần như không nhúc nhích (−0,7% so với input).
-
-**Đối kháng (`adversarial_weight: 0.01`)** là số hạng **duy nhất không tối ưu
-trung vị có điều kiện**. Mọi số hạng ở trên đều là sai số trung bình, nên nghiệm
-tối ưu của chúng là trung vị — và với khử mờ, trung vị đó chính là ảnh mờ. Điều
-này đo được: `tools/delta_report.py` cho thấy `Δ` **trừ bớt** năng lượng ở băng
-chi tiết, tức đầu ra mờ hơn chính đầu vào, trong khi mọi chỉ số tổng hợp vẫn
-thắng baseline (băng LL mang phần chỉnh phơi sáng và nó chi phối sai số pixel).
-
-`PatchDiscriminator` (`qjepa/models/discriminator.py`, 663.745 tham số) chấm điểm
-theo **từng ô** chứ không cả ảnh: `[3, 256, 256]` → bản đồ logit `[1, 31, 31]`,
-mỗi logit phủ khoảng 8×8 pixel. Nét là tính chất cục bộ, và một bản đồ logit cho
-nhiều tín hiệu gradient hơn một số duy nhất. Dùng hinge loss thay BCE vì hinge
-ngừng đẩy khi một ô đã được phân loại đúng với biên đủ rộng, nên discriminator
-khó thắng tuyệt đối và gradient cho decoder không bị triệt tiêu.
-
-Nó có optimizer **riêng**; tham số discriminator không nằm trong optimizer của
-decoder — nếu nằm chung, nó sẽ được tối ưu để *thua* chính nó và số hạng đối
-kháng mất hết ý nghĩa. Trọng số bằng 0 cho tới
-`adversarial_start_after_updates: 1000` rồi tăng tuyến tính, để decoder học màu
-và bố cục trước khi bị đẩy đi sinh kết cấu.
 
 **`smooth_l1_beta: 0.05`**, hạ từ `1.0`. Sai số IMU đã chuẩn hoá đo được là
 `|x| ≈ 0,12–0,14`; với `β = 1.0` toàn bộ quá trình train nằm trong vùng **bậc

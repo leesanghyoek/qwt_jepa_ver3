@@ -6,12 +6,6 @@ from typing import Any
 
 import torch
 
-from ..models.discriminator import (
-    PatchDiscriminator,
-    adversarial_weight,
-    discriminator_hinge_loss,
-    generator_hinge_loss,
-)
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
@@ -46,23 +40,6 @@ class Phase2Trainer:
             lr=self.phase["learning_rate"],
             weight_decay=self.phase["weight_decay"],
         )
-        self.adversarial_maximum = float(self.phase.get("adversarial_weight", 0.0))
-        self.discriminator = None
-        self.discriminator_optimizer = None
-        if self.adversarial_maximum > 0:
-            torch.manual_seed(int(self.phase["discriminator_initialization_seed"]))
-            self.discriminator = PatchDiscriminator(
-                channels=tuple(self.phase["discriminator_channels"])
-            ).to(device)
-            self.discriminator_forward, _ = parallel_forward(
-                self.discriminator, device, config["runtime"].get("gpu_count", "auto")
-            )
-            self.discriminator_optimizer = torch.optim.AdamW(
-                list(self.discriminator.parameters()),
-                lr=float(self.phase["discriminator_learning_rate"]),
-                betas=(0.5, 0.9),
-                weight_decay=0.0,
-            )
         self.frozen_backbone_hash = state_dict_hash(self.system.backbone)
         self.frozen_normalizer_hash = state_dict_hash(self.system.normalizer)
         self.decoder_initialization_hash = state_dict_hash(self.system.decoders)
@@ -78,16 +55,6 @@ class Phase2Trainer:
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         return lr
-
-    def gan_weight(self) -> float:
-        if self.discriminator is None:
-            return 0.0
-        return adversarial_weight(
-            self.successful_updates,
-            start_after=int(self.phase["adversarial_start_after_updates"]),
-            ramp_updates=int(self.phase["adversarial_ramp_updates"]),
-            maximum=self.adversarial_maximum,
-        )
 
     def assert_backbone_frozen(self) -> None:
         if state_dict_hash(self.system.backbone) != self.frozen_backbone_hash:
@@ -105,10 +72,6 @@ class Phase2Trainer:
         lr = self._set_lr()
         totals: dict[str, float] = {"loss": 0.0, "image_l1": 0.0, "imu_accel_smooth_l1": 0.0,
                                     "imu_gyro_smooth_l1": 0.0}
-        gan_weight = self.gan_weight()
-        totals["adversarial_weight"] = gan_weight
-        fakes: list[torch.Tensor] = []
-        reals: list[torch.Tensor] = []
         for raw_batch in microbatches:
             batch = _to_device(raw_batch, self.device)
             restored = self.forward_model(
@@ -136,16 +99,6 @@ class Phase2Trainer:
                 variation_weight=float(self.phase.get("imu_variation_weight", 0.0)),
             )
             loss = self.phase["reconstruction_loss_weight"] * loss
-            if gan_weight > 0:
-                generator = generator_hinge_loss(self.discriminator_forward(restored["image"]))
-                loss = loss + gan_weight * generator
-                totals["adversarial_generator"] = (
-                    totals.get("adversarial_generator", 0.0) + float(generator.detach()) / expected
-                )
-                # Giu lai anh da tach do thi de buoc discriminator khong phai
-                # forward decoder them mot lan nua.
-                fakes.append(restored["image"].detach())
-                reals.append(batch["image_clean"])
             (loss / expected).backward()
             totals["loss"] += float(loss.detach()) / expected
             for key, value in parts.items():
@@ -155,23 +108,6 @@ class Phase2Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             return {"skipped": True, "reason": "non_finite_gradient", **totals}
         self.optimizer.step()
-        if gan_weight > 0:
-            self.discriminator_optimizer.zero_grad(set_to_none=True)
-            for fake, real in zip(fakes, reals):
-                critic = discriminator_hinge_loss(
-                    self.discriminator_forward(real), self.discriminator_forward(fake)
-                )
-                (critic / expected).backward()
-                totals["adversarial_critic"] = (
-                    totals.get("adversarial_critic", 0.0) + float(critic.detach()) / expected
-                )
-            discriminator_norm = torch.nn.utils.clip_grad_norm_(
-                self.discriminator.parameters(), self.phase["gradient_clip_norm"]
-            )
-            # Discriminator hong khong duoc lam hong ca run: bo qua buoc cua rieng
-            # no, decoder da buoc xong va van hop le.
-            if torch.isfinite(discriminator_norm):
-                self.discriminator_optimizer.step()
         self.successful_updates += 1
         return {
             "skipped": False,
@@ -205,12 +141,4 @@ class Phase2Trainer:
             "successful_updates": self.successful_updates,
             "config": config,
             "rng": rng_state(),
-            **(
-                {
-                    "discriminator": self.discriminator.state_dict(),
-                    "discriminator_optimizer": self.discriminator_optimizer.state_dict(),
-                }
-                if self.discriminator is not None
-                else {}
-            ),
         }
