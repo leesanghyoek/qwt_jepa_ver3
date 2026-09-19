@@ -172,4 +172,13 @@ phase2:
   smooth_l1_beta: 0.05
   # Phat trên sai phan bac mot: dai luong duy nhat trong bao cao noi ve do MUOT.
   imu_variation_weight: 0.5
+  # Doi tuong duy nhat KHONG toi uu trung vi co dieu kien. Moi so hang tren deu la
+  # sai so trung binh, nen nghiem cua chung la anh mo — do la ly do delta_report
+  # do thay bang chi tiet bi tru bot. Xem qjepa/models/discriminator.py.
+  adversarial_weight: 0.01
+  adversarial_start_after_updates: 1000   # de decoder hoc mau va bo cuc truoc
+  adversarial_ramp_updates: 1000
+  discriminator_channels: [64, 128, 256]
+  discriminator_learning_rate: 0.0002
+  discriminator_initialization_seed: 73134
   precision: fp32

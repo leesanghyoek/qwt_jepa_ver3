@@ -128,6 +128,20 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
     if phase2.get("imu_variation_weight", 0.0) < 0:
         raise ValueError("phase2.imu_variation_weight cannot be negative")
+    if phase2.get("adversarial_weight", 0.0) < 0:
+        raise ValueError("phase2.adversarial_weight cannot be negative")
+    if phase2.get("adversarial_weight", 0.0) > 0:
+        for key in ("adversarial_start_after_updates", "adversarial_ramp_updates",
+                    "discriminator_learning_rate", "discriminator_channels",
+                    "discriminator_initialization_seed"):
+            if key not in phase2:
+                raise ValueError(f"phase2.adversarial_weight needs phase2.{key}")
+        if int(phase2["adversarial_start_after_updates"]) < 0:
+            raise ValueError("phase2.adversarial_start_after_updates cannot be negative")
+        if int(phase2["adversarial_ramp_updates"]) < 1:
+            raise ValueError("phase2.adversarial_ramp_updates must be at least 1")
+        if not phase2["discriminator_channels"]:
+            raise ValueError("phase2.discriminator_channels cannot be empty")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:

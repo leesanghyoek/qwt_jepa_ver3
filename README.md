@@ -139,9 +139,11 @@ flowchart TB
     SU["Haar synthesis"]
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
-    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5"])
+    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5<br/>+ đối kháng PatchGAN · 0,01"])
+    DSC["<b>PatchDiscriminator</b> · 0,66 M · optimizer riêng<br/>3×256×256 → bản đồ logit 31×31<br/>hinge loss, bật sau update 1000"]
     ZI --> DI --> HI --> PI --> SI --> OI --> L1
     ZU --> DU --> HU --> PU --> SU --> OU --> L1
+    OI --> DSC --> L1
     CI -. "không qua trọng số nào" .-> PI
     CU -.-> PU
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
@@ -150,7 +152,7 @@ flowchart TB
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
     class ZI,ZU lat
     class CI,CU,SI,SU tf
-    class DI,DU,HI,HU,PI,PU,OI,OU p2
+    class DI,DU,HI,HU,PI,PU,OI,OU,DSC p2
     class L1 loss
 ```
 
@@ -359,7 +361,9 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
   IMU** (`imu_variation_weight: 0.5`) vì mọi số hạng khác chấm điểm từng mẫu độc
   lập, nên tín hiệu giật từng mẫu không bị phạt. `smooth_l1_beta: 0.05` giữ sai
   số IMU (`|x| ≈ 0,12`) trong vùng tuyến tính; ở `1.0` gradient yếu gấp 8 lần.
-  Optimizer chỉ chứa decoder.
+  Và **một số hạng đối kháng** (`adversarial_weight: 0.01`): đây là số hạng duy
+  nhất không tối ưu trung vị, nên là cách duy nhất về nguyên lý để có nét thật.
+  Optimizer của phase 2 chỉ chứa decoder; discriminator có optimizer riêng.
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.

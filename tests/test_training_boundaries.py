@@ -135,3 +135,64 @@ def test_phase1_rejects_reconstruction_settings_that_do_nothing():
     config["phase1"]["coefficient_reconstruction_loss_weight"] = 0.3
     with pytest.raises(ValueError, match="decoder_enabled"):
         validate_config(config)
+
+
+def _adversarial_config(start_after=0):
+    config = copy.deepcopy(load_config("configs/smoke.yaml"))
+    config["phase2"].update(
+        adversarial_weight=0.5,
+        adversarial_start_after_updates=start_after,
+        adversarial_ramp_updates=1,
+        discriminator_channels=[8, 16],
+        discriminator_learning_rate=0.0002,
+        discriminator_initialization_seed=7,
+    )
+    validate_config(config)
+    return config
+
+
+def _adversarial_trainer(config):
+    seed_everything(5)
+    phase1 = build_phase1_model(config, ImuNormalizer())
+    system = RestorationSystem(phase1.backbone, phase1.normalizer, build_decoders(config))
+    return system, Phase2Trainer(system, config, torch.device("cpu"), "phase1.pt")
+
+
+def test_discriminator_trains_itself_and_stays_out_of_the_decoder_optimizer():
+    system, trainer = _adversarial_trainer(_adversarial_config())
+    decoder_ids = {id(p) for p in trainer.parameters}
+    critic = list(trainer.discriminator.parameters())
+    # Neu discriminator lot vao optimizer cua decoder thi no se duoc toi uu de
+    # THUA chinh no, va so hang doi khang mat het y nghia.
+    assert decoder_ids.isdisjoint({id(p) for p in critic})
+
+    backbone_before = state_dict_hash(system.backbone)
+    critic_before = [p.detach().clone() for p in critic]
+    metrics = trainer.step([_batch(2)])
+
+    assert not metrics["skipped"]
+    assert metrics["adversarial_weight"] > 0
+    assert "adversarial_generator" in metrics and "adversarial_critic" in metrics
+    assert any(not torch.equal(a, b) for a, b in zip(critic_before, critic))
+    assert state_dict_hash(system.backbone) == backbone_before
+    trainer.assert_backbone_frozen()
+
+
+def test_adversarial_term_is_silent_before_its_start_update():
+    _, trainer = _adversarial_trainer(_adversarial_config(start_after=1000))
+    metrics = trainer.step([_batch(2)])
+    assert metrics["adversarial_weight"] == 0.0
+    assert "adversarial_generator" not in metrics
+    assert trainer.discriminator is not None      # da dung, chi chua dung toi
+
+
+def test_no_discriminator_at_all_when_the_weight_is_zero():
+    config = copy.deepcopy(load_config("configs/smoke.yaml"))
+    config["phase2"]["adversarial_weight"] = 0.0
+    validate_config(config)
+    _, trainer = _adversarial_trainer(config)
+    assert trainer.discriminator is None
+    metrics = trainer.step([_batch(2)])
+    assert not metrics["skipped"]
+    assert metrics["adversarial_weight"] == 0.0
+    assert "discriminator" not in trainer.checkpoint_payload(config)
