@@ -120,11 +120,13 @@ class RestorationSystem(nn.Module):
                 self.normalizer.normalize(imu_noisy_phys),
                 image_time,
                 imu_times,
+                with_skips=self.decoders.uses_skips,
             )
 
     def decode(self, latent: LatentBatch) -> RestoredBatch:
         image_coeff, imu_coeff = self.decoders(
-            latent.ZI, latent.ZU, latent.image_coefficients, latent.imu_coefficients
+            latent.ZI, latent.ZU, latent.image_coefficients, latent.imu_coefficients,
+            latent.image_skips, latent.imu_skips,
         )
         image = self.backbone.image_transform.synthesis(image_coeff, latent.image_layout)
         imu_norm = self.backbone.imu_transform.synthesis(imu_coeff, latent.imu_layout)

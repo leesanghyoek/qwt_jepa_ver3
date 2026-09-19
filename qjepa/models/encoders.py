@@ -9,10 +9,11 @@ DEFAULT_CHANNELS = (32, 64, 96, 128)
 
 
 class DenseCoefficientEncoder(nn.Module):
-    """Four-stage CNN returning only the dense final feature.
+    """Four-stage CNN returning the dense final feature.
 
-    Intermediate tensors remain internal and therefore cannot become decoder
-    skip connections accidentally.
+    Intermediate tensors are returned only when the caller asks for them, so a
+    decoder cannot pick up skip connections by accident — it has to request them,
+    and `phase2.encoder_skips` is the single place that decides.
     """
 
     def __init__(
@@ -32,7 +33,20 @@ class DenseCoefficientEncoder(nn.Module):
             Stage(c2, c3, dim=dim, stride=2, groups=groups),
         )
         self.out_channels = c3
+        # Do phan giai giam mot nua sau moi stage tru stage 0, nen day chinh la
+        # danh sach kenh ma decoder co the noi vao, theo thu tu tu tho den min.
+        self.skip_channels = (c2, c1, c0)
 
-    def forward(self, coefficients: torch.Tensor) -> torch.Tensor:
-        return self.stages(coefficients)
+    def forward(
+        self, coefficients: torch.Tensor, *, return_stages: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        if not return_stages:
+            return self.stages(coefficients)
+        outputs = []
+        x = coefficients
+        for stage in self.stages:
+            x = stage(x)
+            outputs.append(x)
+        # Bo stage cuoi: no chinh la FI/FU, da di qua fusion roi.
+        return x, tuple(reversed(outputs[:-1]))
 

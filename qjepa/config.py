@@ -105,16 +105,18 @@ def validate_config(config: dict[str, Any]) -> None:
     required_maps = {"FI", "FU", "ZI", "ZU", "FI_clean", "FU_clean", "ZI_clean", "ZU_clean"}
     if set(phase1.get("regularized_maps", ())) != required_maps:
         raise ValueError("phase1.regularized_maps must contain all eight raw feature maps")
-    required_phase2 = {
-        "freeze_backbone": True,
-        "decoder_input": "fused_dense_latent_only",
-        # Skip tu tang trung gian cua encoder KHONG duoc cai dat; encoders.py co
-        # tinh khong lo tang trung gian. Giu False de khong ai tuong no chay.
-        "encoder_skips": False,
-    }
+    required_phase2 = {"freeze_backbone": True}
     for key, required in required_phase2.items():
         if phase2.get(key) != required:
             raise ValueError(f"phase2.{key} must be {required!r}")
+    # decoder_input phai noi that ve viec decoder nhan gi. Bat skip ma van khai
+    # "chi latent" la dung loai noi doi ma cac kiem tra o day sinh ra de chan.
+    skips = bool(phase2.get("encoder_skips", False))
+    expected_input = "latent_plus_encoder_skips" if skips else "fused_dense_latent_only"
+    if phase2.get("decoder_input") != expected_input:
+        raise ValueError(
+            f"phase2.decoder_input must be {expected_input!r} when encoder_skips is {skips}"
+        )
     # Hai khoa nay phai noi cung mot chuyen, neu khong config se noi doi ve
     # viec decoder that su lam gi.
     residual = bool(phase2.get("input_coefficient_residual", False))
@@ -182,20 +184,30 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         backbone=build_backbone(config),
         normalizer=normalizer,
         predictor_hidden=config["model"]["predictor_hidden_dim"],
-        decoders=build_decoders(config, residual=False) if enabled else None,
+        # Neo phase 1 khong bao gio nhan skip: neu no co duong vong tu encoder thi
+        # no thoa man duoc neo ma khong ep gi vao latent — dung cai ma neo sinh ra
+        # de ngan. Cung ly do voi viec no giu he so tuyet doi thay vi residual.
+        decoders=build_decoders(config, residual=False, skips=False) if enabled else None,
     )
 
 
-def build_decoders(config: dict[str, Any], *, residual: bool | None = None) -> LatentDecoders:
+def build_decoders(
+    config: dict[str, Any], *, residual: bool | None = None, skips: bool | None = None
+) -> LatentDecoders:
     image_size = config["data"]["image_size"]
+    channels = tuple(config["model"]["encoder_channels"])
     if residual is None:
         residual = bool(config["phase2"].get("input_coefficient_residual", False))
+    if skips is None:
+        skips = bool(config["phase2"].get("encoder_skips", False))
     return LatentDecoders(
         image_coefficient_size=(image_size[0] // 2, image_size[1] // 2),
         imu_coefficient_length=config["data"]["imu_window"] // 2,
-        channels=tuple(config["model"]["encoder_channels"]),
+        channels=channels,
         groups=config["model"]["groupnorm_groups"],
         residual=residual,
+        # Thu tu tu tho den min, khop voi thu tu encoder tra ve.
+        skip_channels=(channels[2], channels[1], channels[0]) if skips else None,
     )
 
 

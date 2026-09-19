@@ -24,6 +24,11 @@ class LatentBatch:
     # bo qua, vi neo phai ep thong tin VAO latent chu khong duoc lay duong vong.
     image_coefficients: torch.Tensor | None = None
     imu_coefficients: torch.Tensor | None = None
+    # Feature trung gian cua encoder. Chi duoc dien khi phase2.encoder_skips bat;
+    # neo phase 1 luon bo qua, vi neo phai ep thong tin VAO latent chu khong duoc
+    # thoa man bang mot duong vong quanh no.
+    image_skips: tuple[torch.Tensor, ...] | None = None
+    imu_skips: tuple[torch.Tensor, ...] | None = None
 
 
 class MultimodalBackbone(nn.Module):
@@ -70,10 +75,18 @@ class MultimodalBackbone(nn.Module):
         imu_normalized: torch.Tensor,
         image_time: torch.Tensor,
         imu_times: torch.Tensor,
+        *,
+        with_skips: bool = False,
     ) -> LatentBatch:
         image_coeff, image_layout = self.image_transform.analysis(image)
         imu_coeff, imu_layout = self.imu_transform.analysis(imu_normalized)
-        fi = self.image_encoder(image_coeff)
-        fu = self.imu_encoder(imu_coeff)
+        image_skips = imu_skips = None
+        if with_skips:
+            fi, image_skips = self.image_encoder(image_coeff, return_stages=True)
+            fu, imu_skips = self.imu_encoder(imu_coeff, return_stages=True)
+        else:
+            fi = self.image_encoder(image_coeff)
+            fu = self.imu_encoder(imu_coeff)
         zi, zu = self.fusion(fi, fu, build_time_metadata(image_time, imu_times))
-        return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout, image_coeff, imu_coeff)
+        return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout, image_coeff, imu_coeff,
+                           image_skips, imu_skips)

@@ -206,9 +206,11 @@ Vì vậy phase 1 có thêm một decoder phụ và số hạng L1 với **hệ 
 tự quy chiếu nên không thể thoả mãn bằng cách vứt tín hiệu.
 
 Decoder phụ dùng đúng `build_decoders`, tức đúng kiến trúc phase 2 sẽ dùng, để
-chữ "giải mã được" có nghĩa thực tế. Nó bị **vứt sau phase 1**; phase 2 vẫn khởi
-tạo decoder mới từ backbone đóng băng, không skip, không residual — luận điểm
-latent-first giữ nguyên. Chi phí: phase 1 chậm thêm ~48% mỗi update.
+chữ "giải mã được" có nghĩa thực tế. Nó bị **vứt sau phase 1**; phase 2 khởi tạo
+decoder mới từ backbone đóng băng. Decoder neo **không bao giờ nhận skip và không
+bao giờ dùng residual** (`build_decoders(config, residual=False, skips=False)`):
+cả hai đều là đường vòng quanh latent, và neo sinh ra để ép thông tin *vào* latent
+chứ không phải để đạt loss thấp. Chi phí: phase 1 chậm thêm ~48% mỗi update.
 
 Đặt `decoder_enabled: false` cùng trọng số 0 để quay lại chế độ latent thuần;
 `configs/smoke.yaml` dùng chế độ đó.
@@ -352,9 +354,32 @@ Decoder phụ của **phase 1 giữ chế độ tuyệt đối** (`build_decoder
 Cho nó residual sẽ phá vỡ mục đích của neo — nó sẽ học `Δ ≈ 0` và không ép được
 thông tin nào vào latent.
 
-Skip từ tầng trung gian của encoder **không được cài đặt**; `encoder_skips` bị ép
-`false` và `encoders.py` cố tình không lộ tầng trung gian. Layout dùng cho inverse
-transform là metadata shape, không chứa tín hiệu.
+### Skip connection từ encoder
+
+`encoder_skips: true` nối ba tầng trung gian của encoder vào đường decoder ở đúng
+ba mức phân giải khớp nhau:
+
+| mức | encoder | decoder nhận vào |
+|---|---|---|
+| 2 | `[96, 32, 32]` | sau `up2` → `[96, 32, 32]` |
+| 1 | `[64, 64, 64]` | sau `up1` → `[64, 64, 64]` |
+| 0 | `[32, 128, 128]` | sau `up0` → `[32, 128, 128]` |
+
+Hợp nhất bằng **conv pointwise** trên tensor nối: `Conv(2c → c, kernel 1)`, khởi
+tạo **identity ở nửa decoder và 0 ở nửa skip**. Nhờ vậy sàn identity của residual
+sống sót qua cả ba điểm nối — tại update 0 đầu ra vẫn bằng đúng đầu vào (đo được:
+sai lệch tối đa 3e-7, tức chỉ là làm tròn float32) — và skip chỉ được dùng dần
+theo mức nó tỏ ra hữu ích.
+
+Đánh đổi phải nói rõ: **độ nét đi qua đường này đến từ ảnh đầu vào, không phải từ
+latent.** Nó làm ảnh nét hơn thật, nhưng "khôi phục từ latent" không còn mô tả
+đúng hệ nữa. Vì vậy `decoder_input` phải khai đúng `latent_plus_encoder_skips`;
+`validate_config` từ chối config bật skip mà vẫn khai `fused_dense_latent_only`.
+
+`encoders.py` chỉ trả tầng trung gian khi người gọi **yêu cầu tường minh**
+(`return_stages=True`), nên không decoder nào nhặt được skip do vô ý.
+
+Layout dùng cho inverse transform là metadata shape, không chứa tín hiệu.
 
 ```text
 L_phase2 = L1(image_raw_restored, image_clean)

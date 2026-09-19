@@ -100,7 +100,9 @@ phase1:
   decoder_enabled: true
   reconstruction_loss_weight: 0.0          # khong co duong pixel-space
   coefficient_reconstruction_loss_weight: 0.45
-  reconstruction_detail_weight: 0.5        # can them cho bang LH/HL/HH va Haar detail
+  # Ngang voi phase 2. Truoc day la 0.5 trong khi phase 2 la 2.0, tuc ta bat decoder
+  # dung lai duong net tu mot latent ma luc hoc gan nhu khong bi hoi ve duong net.
+  reconstruction_detail_weight: 2.0
   online_clean_forward_for_regularization: true
   regularized_maps: [FI, FU, ZI, ZU, FI_clean, FU_clean, ZI_clean, ZU_clean]
   jepa_weight: 1.0
@@ -148,8 +150,11 @@ phase2:
   backbone_checkpoint: null
   decoder_initialization_seed: 73131
   freeze_backbone: true
-  decoder_input: fused_dense_latent_only
-  encoder_skips: false
+  # Skip tu tang trung gian cua encoder. Net di qua duong nay den tu ANH DAU VAO,
+  # khong phai tu latent — no lam anh net hon that, nhung "khoi phuc tu latent"
+  # khong con mo ta dung he nua. Bat tuong minh, va decoder_input phai noi that.
+  encoder_skips: true
+  decoder_input: latent_plus_encoder_skips
   # Decoder du doan HIEU CHINH tren he so dau vao, head zero-init: update 0
   # tra lai dung input, nen model khong bao gio te hon viec khong lam gi.
   input_coefficient_residual: true

@@ -32,7 +32,7 @@ def test_phase_contracts_reject_unimplemented_paths_and_lying_config():
     for section, key, value in (
         ("phase1", "decoder_enabled", True),          # bat decoder ma trong so 0
         ("phase1", "reconstruction_loss_weight", 1.0),  # khong co duong pixel-space
-        ("phase2", "encoder_skips", True),            # chua duoc cai dat
+        ("phase2", "encoder_skips", False),           # lech voi decoder_input
         ("phase2", "reconstruction_detail_weight", -1.0),
     ):
         bad = copy.deepcopy(config)

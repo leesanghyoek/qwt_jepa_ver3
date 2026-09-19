@@ -140,8 +140,11 @@ flowchart TB
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
     L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5"])
+    SK["<b>3 tầng encoder</b> · skip<br/>96×32×32 · 64×64×64 · 32×128×128<br/>SkipMerge: conv pointwise, init identity+0"]
     ZI --> DI --> HI --> PI --> SI --> OI --> L1
     ZU --> DU --> HU --> PU --> SU --> OU --> L1
+    SK --> DI
+    SK --> DU
     CI -. "không qua trọng số nào" .-> PI
     CU -.-> PU
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
@@ -151,6 +154,7 @@ flowchart TB
     class ZI,ZU lat
     class CI,CU,SI,SU tf
     class DI,DU,HI,HU,PI,PU,OI,OU p2
+    class SK bb
     class L1 loss
 ```
 
@@ -210,9 +214,9 @@ nguyên kích thước, ba stage sau `stride=2`.
 | 2 — stride 2 | `[96, 32, 32]` | `[96, 16]` |
 | 3 — stride 2 | **`FI = [128, 16, 16]`** | **`FU = [128, 8]`** |
 
-`DenseCoefficientEncoder` **chỉ trả feature cuối**; các tensor trung gian nằm
-trong `nn.Sequential` và không thoát ra ngoài, nên không thể vô tình biến thành
-skip connection cho decoder.
+`DenseCoefficientEncoder` chỉ trả tầng trung gian khi người gọi **yêu cầu tường
+minh** (`return_stages=True`), nên decoder không thể nhặt được skip do vô ý —
+`phase2.encoder_skips` là nơi duy nhất quyết định.
 
 ### Tầng 3 — fusion có cổng
 
@@ -338,10 +342,11 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/models/pipeline.py`: hai wrapper phase riêng. `LatentPretrainingModel`
   chỉ nhận decoder neo khi `phase1.decoder_enabled` bật, và decoder đó không đi
   sang phase 2; `RestorationSystem` giữ backbone ở eval/frozen.
-- `qjepa/models/decoders.py`: chỉ nhận `ZI/ZU`, không skip và không raw input.
-  Upsample bằng sub-pixel conv (pixel shuffle) thay cho nội suy bilinear, vì
-  bilinear là bộ lọc thông thấp nên không sinh được tần số cao. Ở chế độ residual,
-  head zero-init và cộng vào hệ số của input.
+- `qjepa/models/decoders.py`: nhận `ZI/ZU`, và khi `encoder_skips` bật thì nhận
+  thêm ba tầng trung gian của encoder qua `SkipMerge` (conv pointwise, khởi tạo
+  identity+0 nên sàn identity không bị phá). Upsample bằng sub-pixel conv (pixel
+  shuffle) thay cho nội suy bilinear, vì bilinear là bộ lọc thông thấp nên không
+  sinh được tần số cao. Ở chế độ residual, head zero-init và cộng vào hệ số input.
 - `qjepa/corruptions/image.py`: blur quang học, blur chuyển động, giảm độ phân
   giải, exposure thấp, gamma, white balance, vignette, shot/read/row noise, hot
   pixel, lượng tử và JPEG. Mỗi frame bốc tham số riêng nên độ sáng và độ nhoè
@@ -578,8 +583,11 @@ decoder: decoder đã rút được 62–74% trong khi probe tuyến tính chỉ
 thêm ResNet hay pointwise vào decoder không giải quyết được gì — giới hạn là số
 chiều của `ZI`, mỗi ô latent phủ một khối 16×16 pixel.
 
-Chưa làm: `encoder_skips` vẫn bị ghim `false` (chưa cài, và `encoders.py` cố ý
-không trả feature trung gian), latent đa tỉ lệ, và adversarial loss.
+`encoder_skips` giờ đã cài và **bật mặc định** — nhưng nó mua độ nét bằng cách
+lấy chi tiết từ ảnh đầu vào, nên hãy đọc con số kèm theo `decoder_input:
+latent_plus_encoder_skips` chứ đừng gọi đó là khôi phục thuần từ latent.
+
+Chưa làm: latent đa tỉ lệ, và adversarial loss.
 
 ## Giới hạn dữ liệu
 
