@@ -155,6 +155,10 @@ phase2:
   # khong con mo ta dung he nua. Bat tuong minh, va decoder_input phai noi that.
   encoder_skips: true
   decoder_input: latent_plus_encoder_skips
+  # Cong duoc sinh TU DUONG LATENT, nen no phu thuoc tung vi tri va tung kenh:
+  # latent quyet dinh cho bao nhieu skip di qua. De false thi merge chi la mot conv
+  # pointwise, tuc mot ti le pha tron CO DINH — khong loc duoc gi.
+  skip_gating: true
   # Decoder du doan HIEU CHINH tren he so dau vao, head zero-init: update 0
   # tra lai dung input, nen model khong bao gio te hon viec khong lam gi.
   input_coefficient_residual: true

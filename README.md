@@ -140,11 +140,13 @@ flowchart TB
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
     L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5"])
-    SK["<b>3 tầng encoder</b> · skip<br/>96×32×32 · 64×64×64 · 32×128×128<br/>SkipMerge: conv pointwise, init identity+0"]
+    SK["<b>3 tầng encoder</b> · skip<br/>96×32×32 · 64×64×64 · 32×128×128<br/>đường nét của ảnh NHIỄU: sắc nhưng chưa đáng tin"]
+    GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)<br/>bias −2 ⇒ ban đầu gần như đóng"}}
     ZI --> DI --> HI --> PI --> SI --> OI --> L1
     ZU --> DU --> HU --> PU --> SU --> OU --> L1
-    SK --> DI
-    SK --> DU
+    SK --> GT
+    GT --> DI
+    GT --> DU
     CI -. "không qua trọng số nào" .-> PI
     CU -.-> PU
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
@@ -155,8 +157,14 @@ flowchart TB
     class CI,CU,SI,SU tf
     class DI,DU,HI,HU,PI,PU,OI,OU p2
     class SK bb
+    class GT p2
     class L1 loss
 ```
+
+Khối `SkipMerge` là chỗ phân công: **skip cấp độ phân giải, latent quyết định giữ
+cái gì**. Cổng được sinh từ đường latent nên nó thay đổi theo từng vị trí và từng
+kênh — decoder học cách dùng latent để *lọc* skip, chứ không chỉ pha trộn theo một
+tỉ lệ cố định.
 
 Hai mũi tên nét đứt là hai đường **không đi qua trọng số nào**: hệ số của chính
 ảnh/IMU nhiễu cộng thẳng vào đầu ra. Đó là sàn identity — xem
@@ -343,8 +351,9 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
   chỉ nhận decoder neo khi `phase1.decoder_enabled` bật, và decoder đó không đi
   sang phase 2; `RestorationSystem` giữ backbone ở eval/frozen.
 - `qjepa/models/decoders.py`: nhận `ZI/ZU`, và khi `encoder_skips` bật thì nhận
-  thêm ba tầng trung gian của encoder qua `SkipMerge` (conv pointwise, khởi tạo
-  identity+0 nên sàn identity không bị phá). Upsample bằng sub-pixel conv (pixel
+  thêm ba tầng trung gian của encoder qua `SkipMerge` **có cổng** — cổng sinh từ
+  đường latent nên latent quyết định cho bao nhiêu skip đi qua ở từng vị trí.
+  Khởi tạo sao cho đóng góp skip ban đầu bằng 0, nên sàn identity không bị phá. Upsample bằng sub-pixel conv (pixel
   shuffle) thay cho nội suy bilinear, vì bilinear là bộ lọc thông thấp nên không
   sinh được tần số cao. Ở chế độ residual, head zero-init và cộng vào hệ số input.
 - `qjepa/corruptions/image.py`: blur quang học, blur chuyển động, giảm độ phân

@@ -365,9 +365,27 @@ ba mức phân giải khớp nhau:
 | 1 | `[64, 64, 64]` | sau `up1` → `[64, 64, 64]` |
 | 0 | `[32, 128, 128]` | sau `up0` → `[32, 128, 128]` |
 
-Hợp nhất bằng **conv pointwise** trên tensor nối: `Conv(2c → c, kernel 1)`, khởi
-tạo **identity ở nửa decoder và 0 ở nửa skip**. Nhờ vậy sàn identity của residual
-sống sót qua cả ba điểm nối — tại update 0 đầu ra vẫn bằng đúng đầu vào (đo được:
+Hợp nhất bằng **cổng sinh từ đường latent** (`skip_gating: true`):
+
+```text
+cổng = sigmoid(conv_gate(x))          # x đi lên từ ZI — mang thông tin latent
+ra   = x + cổng × conv_skip(skip)
+```
+
+Đây là chỗ phân công giữa hai nguồn. Skip mang đường nét của ảnh **nhiễu**: sắc
+nét nhưng chứa cả cạnh thật lẫn hạt nhiễu. Latent mới là thứ biết cạnh nào là
+thật, vì nó được huấn luyện để đoán latent của ảnh **sạch** cộng với neo ép nó
+giữ hệ số sạch ở băng chi tiết. Cổng phụ thuộc **từng vị trí và từng kênh**, nên
+decoder học cách dùng latent để *lọc* skip.
+
+Đặt `skip_gating: false` thì merge quay về một conv pointwise trên tensor nối —
+nó chỉ học được một **tỉ lệ pha trộn cố định theo kênh**, giống nhau ở mọi vị trí
+và mọi ảnh, tức không lọc được gì. Chênh lệch chi phí không đáng kể (208 so với
+200 tham số cho một khối 8→8 kênh).
+
+`conv_gate` khởi tạo trọng số 0 và bias −2.0 theo đúng quy ước của
+`SharedGatedFusion`; `conv_skip` zero-init nên đóng góp skip ban đầu **bằng đúng
+0**. Nhờ vậy sàn identity của residual sống sót qua cả ba điểm nối — tại update 0 đầu ra vẫn bằng đúng đầu vào (đo được:
 sai lệch tối đa 3e-7, tức chỉ là làm tròn float32) — và skip chỉ được dùng dần
 theo mức nó tỏ ra hữu ích.
 

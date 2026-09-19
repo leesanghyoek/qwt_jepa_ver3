@@ -7,6 +7,7 @@ import torch
 from qjepa.config import build_backbone, build_decoders, build_phase1_model, load_config
 from qjepa.data import ImuNormalizer
 from qjepa.models import RestorationSystem
+from qjepa.models.decoders import SkipMerge
 from qjepa.evaluation.metrics import image_metrics
 
 
@@ -135,3 +136,31 @@ def test_phase1_anchor_decoder_never_receives_skips():
     # loss thap ma latent van rong — dung that bai ma neo sinh ra de chan.
     assert model.decoders.uses_skips is False
     assert model.decoders.image.uses_skips is False
+
+
+def test_gated_skip_filters_per_position_while_pointwise_only_mixes():
+    """Khac biet quyet dinh: cong co doi theo noi dung khong."""
+    torch.manual_seed(0)
+    gated = SkipMerge(8, 16, dim=2, gated=True)
+    plain = SkipMerge(8, 16, dim=2, gated=False)
+    x = torch.randn(1, 8, 6, 6)
+    skip = torch.randn(1, 16, 6, 6)
+
+    # Ca hai deu bat dau o identity tren duong decoder: san identity cua residual
+    # phai song sot qua diem noi.
+    assert torch.allclose(gated(x, skip), x, atol=1e-6)
+    assert torch.allclose(plain(x, skip), x, atol=1e-6)
+
+    with torch.no_grad():
+        gated.gate.weight.normal_(0, 1.0)
+        gated.skip_project.weight.normal_(0, 1.0)
+    gate = torch.sigmoid(gated.gate(x))
+    # Cong phai bien thien TRONG mot anh — do la phan "latent quyet dinh giu cai
+    # gi". Mot conv pointwise tren tensor noi khong the lam dieu nay: ti le pha
+    # tron cua no co dinh theo kenh, giong nhau o moi vi tri.
+    assert float(gate.max() - gate.min()) > 0.3
+    assert not torch.allclose(gate[..., 0, 0], gate[..., -1, -1], atol=1e-3)
+
+    # Va cong phai doi khi duong decoder doi, tuc no doc duoc latent.
+    other = torch.sigmoid(gated.gate(torch.randn_like(x)))
+    assert float((gate - other).abs().max()) > 0.1

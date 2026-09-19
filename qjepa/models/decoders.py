@@ -9,32 +9,63 @@ from .blocks import Stage, Upsample, initialize_trainable, resize
 
 
 class SkipMerge(nn.Module):
-    """Noi feature encoder vao duong decoder bang mot conv pointwise.
+    """Noi feature encoder vao duong decoder.
 
-    Khoi tao nua ben skip bang 0 nen luc bat dau merge la identity tren duong
-    decoder: san identity cua residual (head zero-init) van con nguyen o update 0,
-    va skip chi duoc dung dan theo muc no to ra huu ich.
+    Skip mang duong net cua anh NHIEU: sac net nhung khong dang tin, vi trong do
+    co ca canh that lan hat nhieu. Latent moi la thu biet canh nao la that — no
+    duoc huan luyen de doan latent cua anh SACH, cong voi neo ep no giu he so sach
+    o bang chi tiet. Nen phan cong dung la: skip cap do phan giai, latent quyet
+    dinh giu cai gi.
+
+    `gated=False` KHONG lam duoc viec do. Mot conv pointwise tren tensor noi chi
+    hoc duoc mot TI LE PHA TRON co dinh theo kenh — sau khi train, kenh nao lay
+    bao nhieu skip la co dinh o moi vi tri, moi anh. No khong the nhin latent de
+    quyet dinh "cho nay canh that, cho qua; cho kia la hat nhieu, chan lai".
+
+    `gated=True` sinh cong TU DUONG LATENT, nen cong phu thuoc tung vi tri va
+    tung kenh. Dung mau va quy uoc cua SharedGatedFusion: bias -2.0 cho
+    sigmoid(-2) ~ 0.12, tuc luc bat dau cong gan nhu dong va mo dan theo muc skip
+    to ra huu ich.
+
+    Ca hai che do deu bat dau o identity tren duong decoder, nen san identity cua
+    residual (head zero-init) con nguyen o update 0.
 
     Danh doi phai noi ro: net di qua duong nay den tu ANH DAU VAO, khong phai tu
-    latent. No lam anh net hon that, nhung "khoi phuc tu latent" khong con mo ta
-    dung he nua — do la ly do `encoder_skips` phai bat tuong minh.
+    latent. Do la ly do `encoder_skips` phai bat tuong minh, va la ly do
+    delta_report.py co --ablate-latent.
     """
 
-    def __init__(self, channels: int, skip_channels: int, *, dim: int) -> None:
+    def __init__(
+        self, channels: int, skip_channels: int, *, dim: int,
+        gated: bool = True, gate_bias: float = -2.0,
+    ) -> None:
         super().__init__()
         conv = nn.Conv1d if dim == 1 else nn.Conv2d
         self.dim = dim
-        self.project = conv(channels + skip_channels, channels, 1)
-        nn.init.zeros_(self.project.bias)
-        with torch.no_grad():
-            self.project.weight.zero_()
-            for index in range(channels):
-                self.project.weight[index, index] = 1.0
+        self.gated = gated
+        if not gated:
+            self.project = conv(channels + skip_channels, channels, 1)
+            nn.init.zeros_(self.project.bias)
+            with torch.no_grad():
+                self.project.weight.zero_()
+                for index in range(channels):
+                    self.project.weight[index, index] = 1.0
+            return
+        self.gate = conv(channels, channels, 1)
+        self.skip_project = conv(skip_channels, channels, 1)
+        # Cong khoi tao tu bias thuan tuy: trong so 0 nen luc dau cong khong phu
+        # thuoc noi dung, va skip_project zero-init nen dong gop ban dau dung bang 0.
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, gate_bias)
+        nn.init.zeros_(self.skip_project.weight)
+        nn.init.zeros_(self.skip_project.bias)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         if skip.shape[2:] != x.shape[2:]:
             skip = resize(skip, tuple(x.shape[2:]), dim=self.dim)
-        return self.project(torch.cat((x, skip), dim=1))
+        if not self.gated:
+            return self.project(torch.cat((x, skip), dim=1))
+        return x + torch.sigmoid(self.gate(x)) * self.skip_project(skip)
 
 
 class LatentCoefficientDecoder(nn.Module):
@@ -48,6 +79,7 @@ class LatentCoefficientDecoder(nn.Module):
         groups: int = 8,
         residual: bool = False,
         skip_channels: tuple[int, ...] | None = None,
+        skip_gating: bool = True,
     ) -> None:
         super().__init__()
         c0, c1, c2, c3 = channels
@@ -73,9 +105,9 @@ class LatentCoefficientDecoder(nn.Module):
         if skip_channels is not None:
             if len(skip_channels) != 3:
                 raise ValueError(f"Expected three skip levels, got {len(skip_channels)}")
-            self.merge2 = SkipMerge(c2, skip_channels[0], dim=dim)
-            self.merge1 = SkipMerge(c1, skip_channels[1], dim=dim)
-            self.merge0 = SkipMerge(c0, skip_channels[2], dim=dim)
+            self.merge2 = SkipMerge(c2, skip_channels[0], dim=dim, gated=skip_gating)
+            self.merge1 = SkipMerge(c1, skip_channels[1], dim=dim, gated=skip_gating)
+            self.merge0 = SkipMerge(c0, skip_channels[2], dim=dim, gated=skip_gating)
         if residual:
             # Bat dau o dung identity: update 0 tra lai chinh he so dau vao, nen
             # model khong the te hon input va moi buoc chi co the di len.
@@ -123,17 +155,18 @@ class LatentDecoders(nn.Module):
         groups: int = 8,
         residual: bool = False,
         skip_channels: tuple[int, ...] | None = None,
+        skip_gating: bool = True,
     ) -> None:
         super().__init__()
         self.residual = residual
         self.uses_skips = skip_channels is not None
         self.image = LatentCoefficientDecoder(
             48, image_coefficient_size, channels, dim=2, groups=groups,
-            residual=residual, skip_channels=skip_channels,
+            residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
         )
         self.imu = LatentCoefficientDecoder(
             12, (imu_coefficient_length,), channels, dim=1, groups=groups,
-            residual=residual, skip_channels=skip_channels,
+            residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
         )
 
     def forward(

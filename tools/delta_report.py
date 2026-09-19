@@ -39,6 +39,11 @@ def main() -> None:
     parser.add_argument("--split", default="valid", choices=("valid", "test"))
     parser.add_argument("--batches", type=int, default=40)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--ablate-latent",
+        action="store_true",
+        help="Chay them mot luot voi ZI/ZU bang 0 de tach cong cua latent khoi skip",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -130,6 +135,48 @@ def main() -> None:
     print("  delta/in gan 0%      -> decoder khong lam gi, dau ra = dau vao.")
     print("  |C_out-sach| TE HON  -> decoder dang lam hong chinh bang do.")
     print("  Bang chi tiet TE HON nhung LL tot hon -> chinh phoi sang, xoa duong net.")
+
+    if args.ablate_latent:
+        _ablate(system, loader, device, args.batches)
+
+
+@torch.no_grad()
+def _ablate(system, loader, device, batches: int) -> None:
+    """Chay lai voi ZI/ZU = 0: phan con lai chi con den tu skip va he so input.
+
+    Voi encoder_skips bat, mot decoder co the hoc cach chep skip roi bo mac latent.
+    Khi do anh van net — nhung net vi no copy dau vao, khong phai vi khoi phuc, va
+    luan diem latent-first mat sach. Day la phep do duy nhat tach duoc hai truong hop.
+    """
+    if not system.decoders.uses_skips:
+        print("\n(--ablate-latent: decoder khong dung skip, phep do nay khong co y nghia)")
+        return
+    full = zeroed = count = 0.0
+    for index, raw in enumerate(loader):
+        if index >= batches:
+            break
+        batch = _to_device(raw, device)
+        latent = system.encode(batch["image_noisy"], batch["imu_noisy_phys"],
+                               batch["image_time"], batch["imu_times"])
+        clean = batch["image_clean"]
+        full += float((system.decode(latent).image - clean).abs().mean())
+        latent.ZI = torch.zeros_like(latent.ZI)
+        latent.ZU = torch.zeros_like(latent.ZU)
+        zeroed += float((system.decode(latent).image - clean).abs().mean())
+        count += 1
+
+    full, zeroed = full / count, zeroed / count
+    share = 100.0 * (zeroed - full) / max(zeroed, 1e-12)
+    print("\n=== ABLATE LATENT: dat ZI/ZU = 0 ===")
+    print(f"  MAE anh binh thuong : {full:.5f}")
+    print(f"  MAE khi ZI/ZU = 0   : {zeroed:.5f}")
+    print(f"  latent dong gop     : {share:.1f}% sai so")
+    if share < 5:
+        print("  -> Decoder gan nhu BO MAC latent: net den tu skip, khong phai khoi phuc.")
+    elif share < 20:
+        print("  -> Latent co dong gop nhung skip dang gan het viec.")
+    else:
+        print("  -> Latent that su dang dieu khien dau ra.")
 
 
 if __name__ == "__main__":

@@ -208,6 +208,7 @@ def build_decoders(
         residual=residual,
         # Thu tu tu tho den min, khop voi thu tu encoder tra ve.
         skip_channels=(channels[2], channels[1], channels[0]) if skips else None,
+        skip_gating=bool(config["phase2"].get("skip_gating", True)),
     )
 
 
