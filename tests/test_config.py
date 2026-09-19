@@ -64,3 +64,25 @@ def test_latent_gate_detects_collapsed_diversity():
     collapsed["validation_clean_ZI_same_position_std"] = 0.01
     passed, reasons = _latent_gate(reference, collapsed, monitor)
     assert not passed and reasons
+
+
+def test_encoder_skips_requires_an_explicit_merge_kind():
+    """Config cu khong co skip_gating phai bi chan o day, khong phai o load_state_dict.
+
+    Neu de mac dinh, mot config cu hash GIONG HET checkpoint cu vi khoa khong ton
+    tai o ca hai ben — roi build_decoders lang le dung kien truc moi, va loi chi
+    lo ra khi nap state_dict, sau khi da dung sai model.
+    """
+    config = load_config("configs/pipeline_v3.yaml")
+    assert config["phase2"]["encoder_skips"] is True
+    bad = copy.deepcopy(config)
+    del bad["phase2"]["skip_gating"]
+    with pytest.raises(ValueError, match="skip_gating"):
+        validate_config(bad)
+
+    # Tat skip thi khoa do khong con y nghia, khong duoc doi hoi.
+    without = copy.deepcopy(config)
+    without["phase2"]["encoder_skips"] = False
+    without["phase2"]["decoder_input"] = "fused_dense_latent_only"
+    del without["phase2"]["skip_gating"]
+    validate_config(without)

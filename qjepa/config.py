@@ -117,6 +117,14 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             f"phase2.decoder_input must be {expected_input!r} when encoder_skips is {skips}"
         )
+    # Phai khai TUONG MINH kieu merge. Neu de mac dinh, mot config cu (khong co
+    # khoa nay) van hash giong het mot checkpoint cu, roi lang le dung kien truc
+    # moi — va loi chi lo ra o load_state_dict, sau khi da dung sai model.
+    if skips and "skip_gating" not in phase2:
+        raise ValueError(
+            "phase2.encoder_skips needs an explicit phase2.skip_gating so the"
+            " configuration hash records which merge the checkpoint was trained with"
+        )
     # Hai khoa nay phai noi cung mot chuyen, neu khong config se noi doi ve
     # viec decoder that su lam gi.
     residual = bool(phase2.get("input_coefficient_residual", False))
@@ -208,7 +216,7 @@ def build_decoders(
         residual=residual,
         # Thu tu tu tho den min, khop voi thu tu encoder tra ve.
         skip_channels=(channels[2], channels[1], channels[0]) if skips else None,
-        skip_gating=bool(config["phase2"].get("skip_gating", True)),
+        skip_gating=bool(config["phase2"]["skip_gating"]) if skips else True,
     )
 
 
