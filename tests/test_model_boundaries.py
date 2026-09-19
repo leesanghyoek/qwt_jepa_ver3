@@ -164,3 +164,44 @@ def test_gated_skip_filters_per_position_while_pointwise_only_mixes():
     # Va cong phai doi khi duong decoder doi, tuc no doc duoc latent.
     other = torch.sigmoid(gated.gate(torch.randn_like(x)))
     assert float((gate - other).abs().max()) > 0.1
+
+
+def test_residual_head_can_only_denoise_when_it_sees_the_input():
+    """Khu nhieu = tru bot phan nhieu, nen head PHAI doc duoc dau vao.
+
+    Dich o day la co gian nua bang detail cua Haar — dung la phep khu nhieu
+    wavelet. Latent duoc cho la nhieu thuan, khong tuong quan voi dich, nen bai
+    nay chi giai duoc bang C_in. Do cung la ly do latent that khong giup: no duoc
+    huan luyen de doan latent cua tin hieu SACH, tuc de VUT BO hien thuc cua nhieu.
+    """
+    config = load_config("configs/pipeline_v3.yaml")
+    half = 6
+
+    def learned_error(sees_input):
+        variant = copy.deepcopy(config)
+        variant["phase2"]["residual_sees_input"] = sees_input
+        decoder = build_decoders(variant, skips=False).imu
+        optimizer = torch.optim.Adam(decoder.parameters(), lr=3e-3)
+        torch.manual_seed(0)
+        for _ in range(250):
+            latent = torch.randn(8, 128, 8)
+            coefficients = torch.randn(8, 12, 64)
+            target = coefficients.clone()
+            target[:, half:] *= 0.3
+            loss = (decoder(latent, coefficients) - target).abs().mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        with torch.no_grad():
+            coefficients = torch.randn(32, 12, 64)
+            target = coefficients.clone()
+            target[:, half:] *= 0.3
+            got = decoder(torch.randn(32, 128, 8), coefficients)
+            return float((got - target).abs().mean()), float((coefficients - target).abs().mean())
+
+    blind, baseline = learned_error(False)
+    seeing, _ = learned_error(True)
+    # Head chi doc latent khong hoc duoc gi: no bang dung muc "khong lam gi".
+    assert blind > 0.9 * baseline
+    # Head doc duoc C_in giai gan nhu tron ven.
+    assert seeing < 0.1 * baseline

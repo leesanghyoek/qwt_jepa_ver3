@@ -410,6 +410,17 @@ L_phase2 = L1(image_raw_restored, image_clean)
                     + L1(Δt gyro_norm_restored, Δt gyro_norm_clean)]
 ```
 
+**`residual_sees_input: true`** cho head đọc `concat(x, C_in)` thay vì chỉ `x`.
+Không có nó, `Δ = f(Z)`, và decoder **không biểu diễn được phép khử nhiễu**: muốn
+trừ bớt nhiễu thì phải đọc được nó, mà latent được huấn luyện để đoán latent của
+tín hiệu *sạch*, tức để vứt bỏ hiện thực của nhiễu.
+
+Đây không phải suy đoán. `tools/imu_oracle.py` chấm điểm các đầu ra cố định bằng
+đúng loss đang dùng: một bộ lọc Gauss `σ=2.0` **giảm loss IMU 74,8%**. Loss không
+hề thưởng việc không làm gì — model đang bỏ lỡ một món lợi khổng lồ vì không thể
+với tới. Và trên bài co giãn wavelet (đúng nghĩa khử nhiễu), head cũ giảm được
+**0%** còn head mới giảm **100%**.
+
 **Băng chi tiết (`reconstruction_detail_weight: 2.0`)** phạt riêng phần đường nét
 bị mất. L1 trên pixel tối ưu về trung vị có điều kiện, mà với bài toán bất định
 như khử mờ thì nghiệm đó **chính là ảnh mờ** — nên cần một số hạng nhắm thẳng vào

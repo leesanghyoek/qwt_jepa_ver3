@@ -80,11 +80,13 @@ class LatentCoefficientDecoder(nn.Module):
         residual: bool = False,
         skip_channels: tuple[int, ...] | None = None,
         skip_gating: bool = True,
+        sees_input: bool = True,
     ) -> None:
         super().__init__()
         c0, c1, c2, c3 = channels
         self.dim = dim
         self.residual = residual
+        self.sees_input = bool(residual and sees_input)
         self.uses_skips = skip_channels is not None
         self.output_size = output_size
         sizes = []
@@ -98,7 +100,14 @@ class LatentCoefficientDecoder(nn.Module):
         self.shuffle0 = Upsample(c1, dim=dim)
         self.up0 = Stage(c1, c0, dim=dim, groups=groups)
         conv = nn.Conv1d if dim == 1 else nn.Conv2d
-        self.head = conv(c0, output_channels, 3, padding=1)
+        # Voi sees_input, head doc CA duong latent lan he so dau vao. Khong co no,
+        # delta = f(Z) va decoder khong the bieu dien mot phep khu nhieu: muon tru
+        # bot phan nhieu thi phai DOC duoc no, ma latent duoc huan luyen de doan
+        # latent cua tin hieu SACH, tuc duoc day de vut bo hien thuc cua nhieu.
+        # Voi he so wavelet, co bien phep co gian — delta = -alpha * C_in tren nua
+        # bang detail — nam trong tam mot conv duy nhat.
+        head_in = c0 + output_channels if self.sees_input else c0
+        self.head = conv(head_in, output_channels, 3, padding=1)
         initialize_trainable(self)
         # Sau initialize_trainable, vi SkipMerge tu dat trong so identity+zero cua
         # no va khong duoc Kaiming ghi de.
@@ -136,11 +145,11 @@ class LatentCoefficientDecoder(nn.Module):
         if tuple(x.shape[2:]) != tuple(self.output_size):
             # Luoi khong chia het cho 8; chi con lai phan le sau ba lan nhan doi.
             x = resize(x, self.output_size, dim=self.dim)
-        predicted = self.head(x)
         if not self.residual:
-            return predicted
+            return self.head(x)
         if base is None:
             raise ValueError("Residual decoding needs the input coefficients as base")
+        predicted = self.head(torch.cat((x, base), dim=1) if self.sees_input else x)
         return base + predicted
 
 
@@ -156,6 +165,7 @@ class LatentDecoders(nn.Module):
         residual: bool = False,
         skip_channels: tuple[int, ...] | None = None,
         skip_gating: bool = True,
+        sees_input: bool = True,
     ) -> None:
         super().__init__()
         self.residual = residual
@@ -163,10 +173,12 @@ class LatentDecoders(nn.Module):
         self.image = LatentCoefficientDecoder(
             48, image_coefficient_size, channels, dim=2, groups=groups,
             residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
+            sees_input=sees_input,
         )
         self.imu = LatentCoefficientDecoder(
             12, (imu_coefficient_length,), channels, dim=1, groups=groups,
             residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
+            sees_input=sees_input,
         )
 
     def forward(

@@ -129,8 +129,8 @@ flowchart TB
     ZU["<b>ZU</b> · 128 × 8<br/>backbone ĐÓNG BĂNG"]
     DI["<b>Decoder ảnh</b> · 1,53 M · sub-pixel conv<br/>128×16×16 → 128×32×32 → 96×32×32<br/>→ 96×64×64 → 64×64×64<br/>→ 64×128×128 → 32×128×128"]
     DU["<b>Decoder IMU</b> · 0,33 M · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
-    HI["head conv 3×3 · <b>zero-init</b><br/>Δi = 48 × 128 × 128"]
-    HU["head conv 3×3 · <b>zero-init</b><br/>Δu = 12 × 64"]
+    HI["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Ci<br/>Δi = 48 × 128 × 128"]
+    HU["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Cu<br/>Δu = 12 × 64"]
     CI["<b>Ci</b> · hệ số của chính ảnh mờ<br/>48 × 128 × 128"]
     CU["<b>Cu</b> · hệ số của chính IMU nhiễu<br/>12 × 64"]
     PI(("＋"))
@@ -149,6 +149,8 @@ flowchart TB
     GT --> DU
     CI -. "không qua trọng số nào" .-> PI
     CU -.-> PU
+    CI --> HI
+    CU --> HU
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
     classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
@@ -299,9 +301,15 @@ bilinear — bilinear là bộ lọc thông thấp nên không sinh được t�
 | `shuffle0` | `[64, 128, 128]` | `[64, 64]` |
 | `up0` | `[32, 128, 128]` | `[32, 64]` |
 | **`merge0`** skip có cổng | `+ [32, 128, 128]` từ encoder | `+ [32, 64]` |
-| `head` conv 3×3 | `Δ [48, 128, 128]` | `Δ [12, 64]` |
+| `head` conv 3×3 — đọc **cả `C_in`** | `Δ [48, 128, 128]` | `Δ [12, 64]` |
 | cộng hệ số input | `C_in + Δ` | `C_in + Δ` |
 | synthesis | `[3, 256, 256]` | `[6, 128]` |
+
+Head nhận `concat(x, C_in)`, không chỉ `x`. Nếu chỉ đọc latent thì `Δ = f(Z)` và
+decoder **không biểu diễn được phép khử nhiễu** — muốn trừ bớt nhiễu thì phải đọc
+được nó, mà latent được huấn luyện để đoán latent của tín hiệu *sạch*, tức để vứt
+bỏ hiện thực của nhiễu. Đo được: head cũ giảm được **0%** sai số trên bài co giãn
+wavelet, head mới giảm **100%**.
 
 Ba khối `merge*` dùng `x + sigmoid(conv_gate(x)) × conv_skip(skip)`: cổng sinh từ
 **đường latent** nên nó đổi theo từng vị trí và từng kênh — latent quyết định cho

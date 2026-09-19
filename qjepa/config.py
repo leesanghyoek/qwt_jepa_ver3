@@ -134,6 +134,13 @@ def validate_config(config: dict[str, Any]) -> None:
             f"phase2.output_coefficients must be {expected_output!r} when"
             f" input_coefficient_residual is {residual}"
         )
+    # Cung ly do voi skip_gating: de mac dinh thi mot config cu hash giong het mot
+    # checkpoint cu roi lang le dung kien truc khac.
+    if residual and "residual_sees_input" not in phase2:
+        raise ValueError(
+            "phase2.input_coefficient_residual needs an explicit"
+            " phase2.residual_sees_input so the hash records which head was trained"
+        )
     if phase2.get("reconstruction_detail_weight", 0.0) < 0:
         raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
     if phase2.get("imu_variation_weight", 0.0) < 0:
@@ -217,6 +224,7 @@ def build_decoders(
         # Thu tu tu tho den min, khop voi thu tu encoder tra ve.
         skip_channels=(channels[2], channels[1], channels[0]) if skips else None,
         skip_gating=bool(config["phase2"]["skip_gating"]) if skips else True,
+        sees_input=bool(config["phase2"]["residual_sees_input"]) if residual else False,
     )
 
 

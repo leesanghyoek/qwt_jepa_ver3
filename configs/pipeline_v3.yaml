@@ -163,6 +163,12 @@ phase2:
   # tra lai dung input, nen model khong bao gio te hon viec khong lam gi.
   input_coefficient_residual: true
   output_coefficients: input_residual
+  # Head doc CA duong latent lan he so dau vao. Khong co no, delta = f(Z) va
+  # decoder KHONG BIEU DIEN DUOC phep khu nhieu — muon tru bot nhieu thi phai doc
+  # duoc no, ma latent duoc day de vut bo hien thuc cua nhieu. Do duoc: mot bo loc
+  # Gauss co dinh giam loss IMU 74,8% (tools/imu_oracle.py), tuc model dang bo lo
+  # mot mon loi khong lo vi khong the voi toi.
+  residual_sees_input: true
   reconstruction_loss_weight: 1.0
   jepa_loss_weight: 0.0
   sensitivity_loss_weight: 0.0
