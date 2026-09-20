@@ -211,7 +211,14 @@ Data_hard 83`, split hint `None`, và mỗi audit cho `imu_rate_hz≈100`,
 
 ## Cell 4 — Khóa cấu hình train hai giai đoạn
 
-Main mặc định: 10.000 update phase 1, sau đó 5.000 update phase 2. Không dùng
+Recipe Kaggle `p1_detail2_trial`: 8.000 update phase 1, sau đó 5.000 update phase 2.
+Neo phase 1 = `0.45`, detail = `2.0`; phase 2 tắt encoder skip và giữ head đọc
+hệ số input, beta `0.05`, detail `2.0`, variation `0.5`, energy `1.0`.
+Đây là run mới để so với checkpoint phase 1 cũ dùng detail `0.5`.
+Không chép lại khối phase 1 từ `resolved_config.yaml` của run cũ.
+Nếu dùng notebook cũ, thay **toàn bộ Cell 4** bằng block dưới; chỉ clone code mới
+không loại bỏ những dòng override còn nằm trong notebook.
+Không dùng
 `configs/smoke.yaml` để công bố kết quả model chính. Smoke chỉ kiểm tra wiring.
 Giữ nguyên config từ đầu đến cuối run để hash checkpoint khớp khi resume.
 
@@ -221,27 +228,44 @@ import yaml
 from qjepa.config import load_config, serializable_config, validate_config
 
 MANIFEST = PROJECT / 'manifests/kaggle'
-OUT = PROJECT / 'outputs/kaggle_main'
+OUT = PROJECT / 'outputs/p1_detail2_trial'
 CONFIG = PROJECT / 'configs/kaggle.yaml'
-# kaggle_tartanair_v2.yaml đã chứa recipe chính + thiết lập Kaggle; chỉ còn ghi
+# kaggle_tartanair_v2.yaml đã chứa recipe thử mới + thiết lập Kaggle; chỉ còn ghi
 # đè các đường dẫn thực của session này (mount có thể đổi tên giữa các session).
 config = serializable_config(load_config(PROJECT / 'configs/kaggle_tartanair_v2.yaml'))
 config['data'].update(root=str(DATA_ROOT), manifest_dir=str(MANIFEST))
 config['runtime'].update(output_dir=str(OUT))
 validate_config(config)
+# Không âm thầm ghi đè cấu hình của một run khác khi chạy lại cell.
+from qjepa.training.checkpoints import configuration_hash
+for phase in ('phase1', 'phase2'):
+    resolved = OUT / phase / 'resolved_config.yaml'
+    if resolved.is_file():
+        previous = yaml.safe_load(resolved.read_text())
+        assert configuration_hash(previous, phase) == configuration_hash(config, phase), (
+            f'{phase}: OUT chứa run khác cấu hình. Chọn OUT mới, giữ lại checkpoint cũ.'
+        )
 CONFIG.write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
 print(CONFIG.read_text())
 print('Source commit:', SOURCE_COMMIT)
+print('OUT:', OUT)
+print('P1:', config['phase1']['max_successful_updates'], 'updates | neo:',
+      config['phase1']['coefficient_reconstruction_loss_weight'], '| detail:',
+      config['phase1']['reconstruction_detail_weight'])
+print('P2:', config['phase2']['max_successful_updates'], 'updates | skip:',
+      config['phase2']['encoder_skips'])
 ```
 
-Có thể giảm `num_workers` về 0 khi gặp lỗi worker/RAM (notebook GPU của Kaggle
-chỉ có 4 vCPU, config đặt sẵn 2). Không giảm batch phase 1 dưới 8 để né OOM; loss
+Recipe đặt `num_workers: 0`, `pin_memory: false` để giảm RAM phía worker.
+Vẫn theo dõi RSS: run trước từng tăng RAM ở process chính dù workers bằng 0.
+Không giảm batch phase 1 dưới 8 để né OOM; loss
 thống kê batch sẽ đổi ý nghĩa — dùng `--gpus 2` thay vì hạ batch. Cell 7 đo chi
 phí recipe thực trên GPU đang có. Mọi thay đổi kiến trúc/corruption/lịch train
 cần run mới.
 
-Config ghi ra `configs/kaggle.yaml` nằm trong `/kaggle/working` nên còn lại sau
-khi session dừng; cell 8 dùng đúng file đó để resume.
+Config ghi ra `configs/kaggle.yaml` nằm trong `/kaggle/working`. Để tiếp tục
+sau khi mất session, phải lưu output hoặc tải archive ở cell 14; không dựa vào
+việc thư mục working sẽ còn ở session mới. Resume dùng đúng config đã lưu.
 
 ## Cell 5 — Tạo manifest, kiểm tra split và normalization
 
@@ -423,7 +447,7 @@ không trỏ riêng một file `.pt`. Với cùng session, để `None`; cell tr
 `last.pt`. Source/config và mount dataset phải phù hợp với run cũ.
 
 ```python
-RESUME_RUN = None  # Path('/kaggle/input/<previous-output>/outputs/kaggle_main')
+RESUME_RUN = None  # Path('/kaggle/input/<previous-output>/outputs/p1_detail2_trial')
 if RESUME_RUN is not None:
     assert not OUT.exists(), 'Đã có run tại OUT; không ghi đè. Dùng bản đang có hoặc session mới.'
     previous_revision = Path(RESUME_RUN) / 'source_revision.txt'
@@ -496,6 +520,22 @@ Kiểm tra diversity dataset/batch, corruption, LR và so control không FD bằ
 `configs/phase1_control.yaml` trong **run khác**. Gate PASS là kiểm tra tương đối,
 không phải chứng minh latent đã có chất lượng tốt.
 
+Sau phase 1, chạy block này để lưu probe và so với mốc ảnh 53% của run cũ.
+Probe hiện đọc đầu vào **sạch**, chấm MAE pixel; chưa phải phép đo riêng đường
+nét hoặc khôi phục từ đầu vào nhiễu. Mốc PCA 94% chỉ là tham khảo nén patch sạch,
+không phải trần khôi phục JEPA hoặc bằng chứng phase 1 mới chắc chắn tốt hơn.
+
+```python
+probe = subprocess.run([
+    sys.executable, '-u', 'tools/latent_probe.py',
+    '--checkpoint', str(PHASE1), '--manifest', str(MANIFEST), '--samples', '8000',
+], cwd=PROJECT, check=True, capture_output=True, text=True)
+(OUT / 'phase1/latent_probe_clean.txt').write_text(probe.stdout, encoding='utf-8')
+print(probe.stdout)
+```
+
+Có thể chạy cell 14 ngay sau phase 1 để tải checkpoint trước khi tiếp tục phase 2.
+
 ## Cell 11 — Train phase 2: chỉ cập nhật decoder
 
 ```python
@@ -525,6 +565,25 @@ microbatch 4 mẫu được chia 2 mẫu mỗi GPU. Hai GPU giúp phần forward
 decoder, không thay đổi số update hay nghĩa của gradient accumulation.
 
 ## Cell 12 — Đánh giá toàn bộ test và xuất kết quả
+
+Để so với run trước, chạy validation full/full và báo cáo hệ số trước.
+File báo cáo được lưu trong OUT để đi cùng archive. `delta_report` hiện không
+chạy ablation latent khi skip tắt, nên bảng này chưa định lượng đóng góp latent.
+
+```python
+BEST = OUT / 'phase2/best_joint_validation.pt'
+EVAL_VALID = OUT / 'eval_valid'
+run_cli('evaluate', '--checkpoint', BEST, '--manifest', MANIFEST,
+        '--split', 'valid', '--image-mode', 'full', '--imu-mode', 'full',
+        '--device', 'cuda', '--output', EVAL_VALID, '--panels', '2')
+report = subprocess.run([
+    sys.executable, '-u', 'tools/delta_report.py',
+    '--checkpoint', str(BEST), '--manifest', str(MANIFEST),
+    '--split', 'valid', '--batches', '40',
+], cwd=PROJECT, check=True, capture_output=True, text=True)
+(OUT / 'phase2/delta_report_valid.txt').write_text(report.stdout, encoding='utf-8')
+print(report.stdout)
+```
 
 Chỉ dùng test sau khi đã chọn checkpoint bằng validation. Protocol chạy10 nhóm,
 chi phí khoảng10 lượt inference toàn test; không giới hạn batch trong kết quả
@@ -593,11 +652,12 @@ from IPython.display import FileLink
 
 EXPORT = PROJECT / 'exports/qwt_jepa_v3_run.zip'
 EXPORT.parent.mkdir(parents=True, exist_ok=True)
-include = ['qjepa', 'configs', 'tests', 'pyproject.toml', 'README.md', 'source_revision.txt',
+include = ['qjepa', 'configs', 'tools', 'tests', 'pyproject.toml', 'README.md', 'source_revision.txt',
            'QWT_JEPA_JACOBIAN_MIGRATION_GUIDE.md', 'QWT_JEPA_V3_DETAILED_ARCHITECTURE_DIAGRAMS.md',
            'kaggle_dataset.md',
            'KAGGLE_TRAIN_CELLS.md', 'KIEN_TRUC_VA_QUY_TRINH_TRAIN.md', 'CODE_REVIEW_KAGGLE.md',
-           'manifests/kaggle', 'outputs/kaggle_main']
+           str(MANIFEST.relative_to(PROJECT)), str(OUT.relative_to(PROJECT))]
+assert (OUT / 'phase1/last.pt').is_file(), 'Chưa có checkpoint phase 1 để lưu.'
 with zipfile.ZipFile(EXPORT, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
     for name in include:
         path = PROJECT / name
@@ -616,7 +676,7 @@ dừng sau checkpoint và chạy cell14; các phase sau chưa có sẽ được 
 ## Các file cần kiểm tra sau train
 
 ```text
-outputs/kaggle_main/
+outputs/p1_detail2_trial/
 ├── source_revision.txt
 ├── phase1/
 │   ├── last.pt
@@ -657,6 +717,9 @@ outputs/kaggle_main/
 | Muốn dùng `torchrun`/DDP | Backend hiện là `DataParallel` một process; CLI từ chối khi `WORLD_SIZE>1`. Chạy `python -m qjepa` một lần, không bọc `torchrun` |
 | Không có PNG vì session dừng giữa train | Chạy `plot-training` trên log hiện có; khôi phục từ `last.pt` |
 
-Chưa có kết quả train chính trên dataset của bạn tại thời điểm viết tài liệu.
+Run trước đạt PSNR khoảng 20,60 dB và SSIM 0,673 trên validation full/full,
+nhưng ảnh vẫn mờ theo quan sát. Recipe `p1_detail2_trial` chưa có kết quả;
+so probe, sai số băng chi tiết, ảnh trực quan và RMSE/variation IMU trước khi
+kết luận thay đổi phase 1 có ích.
 Các chỉ số hiển thị sau khi chạy là số đo của run thực; không có bảng kết quả
 chất lượng được điền sẵn. Smoke local chỉ xác nhận code và file báo cáo chạy được.

@@ -4,6 +4,15 @@ Source: [leesanghyoek/qwt_jepa_ver3](https://github.com/leesanghyoek/qwt_jepa_ve
 Trên Kaggle, bắt đầu từ [Cell 1: clone GitHub](KAGGLE_TRAIN_CELLS.md#cell-1--clone-source-từ-github-và-ghi-lại-commit),
 sau đó chạy lần lượt các cell train và đánh giá.
 
+Lần thử Kaggle hiện tại dùng `configs/kaggle_tartanair_v2.yaml`: phase 1
+**8.000 update, neo 0,45, detail 2,0**; phase 2 **5.000 update, encoder skip tắt**,
+head đọc hệ số input, beta 0,05 / detail 2,0 / variation 0,5 / energy 1,0.
+Dùng OUT mới `outputs/p1_detail2_trial` để so với run phase 1 detail 0,5 trước đó.
+Notebook cũ cần thay toàn bộ Cell 4 theo tài liệu; các override cũ không tự mất
+khi clone source mới. Các sơ đồ bên dưới mô tả cả đường skip tùy chọn; đường đó
+không hoạt động trong recipe Kaggle này. Lưu archive ở Cell 14 sau phase 1 và
+sau phase 2 để giữ checkpoint qua phiên.
+
 Repository này triển khai pipeline hai giai đoạn theo
 `QWT_JEPA_JACOBIAN_MIGRATION_GUIDE.md` và
 `QWT_JEPA_V3_DETAILED_ARCHITECTURE_DIAGRAMS.md`:
@@ -398,8 +407,8 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.
-- `configs/kaggle_tartanair_v2.yaml`: cùng recipe đó, chỉ đổi đường dẫn/thiết bị/
-  worker cho notebook Kaggle + dataset TartanAir V2.
+- `configs/kaggle_tartanair_v2.yaml`: thử phase 1 detail 2,0 trong 8.000 update;
+  phase 2 tắt skip, 5.000 update, workers 0 và pin memory tắt trên Kaggle.
 
 ## Chuẩn bị môi trường
 

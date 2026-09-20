@@ -1,10 +1,10 @@
 # Recipe chinh cho Kaggle + dataset TartanAir V2 cua ban (14 environment, 166
 # trajectory, anh 256x256 RGB, IMU 100 Hz, camera 10 Hz).
 #
-# Chi khac pipeline_v3.yaml o duong dan va cac tham so phu thuoc may:
-# thiet bi, so GPU, so worker va thu muc ghi ket qua. Kien truc, corruption,
-# loss va lich train giu nguyen — doi nhung thu do la doi semantics va phai bat
-# dau run moi.
+# Thu nghiem p1_detail2: neo 0.45, detail phase 1 = 2.0, 8000 update.
+# Phase 2 giu loss hien tai, tat encoder skip, 5000 update. So voi run
+# kaggle_residual045 cu (P1 detail 0.5), can train ca hai phase trong OUT moi.
+# Giu seed, corruption va kich thuoc latent de so sanh; chua tach skip anh/IMU.
 #
 # DATA_ROOT phai la thu muc co CON TRUC TIEP la cac environment:
 #   <root>/AmericanDiner/Data_easy/P000/image_lcam_front/*.png
@@ -12,12 +12,12 @@
 # Tro cao hon mot bac se nhat them ban sao trong tartanair-v2-jepa/train va
 # build-manifest se bao loi "Mixed explicit and missing split directories".
 extends: pipeline_v3.yaml
-experiment_name: qwt_jepa_low_light_latent_first_v3_kaggle
+experiment_name: qwt_jepa_p1_detail2_kaggle
 
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/outputs/v3
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p1_detail2_trial
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   validation_batches: 32
@@ -26,5 +26,22 @@ data:
   # Cell 3 tu do lai duong dan nay va ghi de neu mount khac.
   root: /kaggle/input/tartanairkhoi/tartanair-v2
   manifest_dir: /kaggle/working/outputs/manifest
-  num_workers: 2         # notebook GPU cua Kaggle chi co 4 vCPU
-  pin_memory: true
+  num_workers: 0         # giam RAM worker; van can theo doi RSS cua process chinh
+  pin_memory: false
+
+phase1:
+  coefficient_reconstruction_loss_weight: 0.45
+  reconstruction_detail_weight: 2.0
+  max_successful_updates: 8000
+
+phase2:
+  encoder_skips: false
+  decoder_input: fused_dense_latent_only
+  input_coefficient_residual: true
+  output_coefficients: input_residual
+  residual_sees_input: true
+  max_successful_updates: 5000
+  smooth_l1_beta: 0.05
+  reconstruction_detail_weight: 2.0
+  imu_variation_weight: 0.5
+  detail_energy_weight: 1.0
