@@ -162,18 +162,41 @@ def _training_batch_stream(
             batch_size,
             train=True,
             generator=torch.Generator().manual_seed(epoch_seed),
-            batch_sampler=batch_sampler,
+            batch_sampler=_SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler,
         )
         produced = False
-        for batch_index, batch in enumerate(loader):
-            if batch_index < first_batch:
-                continue
+        for batch in loader:
             produced = True
             yield batch
         if not produced:
             raise ValueError("DataLoader produced no remaining full training batches")
         epoch += 1
         first_batch = 0
+
+
+class _SkipBatches:
+    """Bo qua N batch DAU TIEN o muc sampler, truoc khi du lieu duoc nap.
+
+    Sampler chi sinh ra danh sach chi so, nen bo qua o day khong ton gi. Truoc
+    day vong lap bo qua o muc DataLoader — moi batch bi bo van duoc giai nen PNG
+    va chay het corruption roi moi bi vut di, nen resume o update 2500 phai nap
+    20.000 anh truoc khi in duoc dong log dau tien.
+
+    An toan ve ngu nghia: sampler cung seed cho cung thu tu batch, va corruption
+    duoc seed theo TUNG MAU (derive_seed) chu khong theo thu tu, nen bo qua khong
+    lam lech bat cu thu gi.
+    """
+
+    def __init__(self, inner, skip: int) -> None:
+        self.inner, self.skip = inner, skip
+
+    def __iter__(self):
+        for index, batch in enumerate(self.inner):
+            if index >= self.skip:
+                yield batch
+
+    def __len__(self) -> int:
+        return max(0, len(self.inner) - self.skip)
 
 
 class _Jsonl:
