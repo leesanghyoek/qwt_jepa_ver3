@@ -333,6 +333,24 @@ def _validate_active_blur(
     }
 
 
+def _phase2_full_blur_guard(
+    evaluation: dict[str, Any], blur: dict[str, Any], reference: dict[str, Any],
+    limits: dict[str, float],
+) -> tuple[bool, list[str]]:
+    """Keep a blur improvement only if full-image and IMU quality remain near initialization."""
+    old_full, old_blur = reference["full"], reference["blur"]
+    checks = {
+        "image_psnr_db": evaluation["image_psnr_db"] >= old_full["image_psnr_db"] - limits["max_psnr_drop_db"],
+        "image_ssim": evaluation["image_ssim"] >= old_full["image_ssim"] - limits["max_ssim_drop"],
+        "accel_rmse": evaluation["accel_rmse"] <= old_full["accel_rmse"] * limits["max_accel_rmse_ratio"],
+        "gyro_rmse": evaluation["gyro_rmse"] <= old_full["gyro_rmse"] * limits["max_gyro_rmse_ratio"],
+        "blur_image_mae": blur["image_mae_restored"] < old_blur["image_mae_restored"],
+        "blur_edge_error": blur["strong_edge_gradient_mae_restored"] < old_blur["strong_edge_gradient_mae_restored"],
+    }
+    failures = [name for name, passed in checks.items() if not passed]
+    return not failures, failures
+
+
 def _write_resolved(config: dict[str, Any], output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     (output / "resolved_config.yaml").write_text(
@@ -726,6 +744,12 @@ def _load_phase1_for_phase2(
 
 def command_train_phase2(args: argparse.Namespace) -> None:
     config = load_config(_config_path(args.config))
+    init_checkpoint = getattr(args, "decoder_init_checkpoint", None)
+    decoder_init_source = str(Path(init_checkpoint).resolve()) if init_checkpoint else None
+    if args.resume and init_checkpoint:
+        raise ValueError("Use --resume alone; decoder initialization is already in the checkpoint")
+    if "full_guard" in config["phase2"] and not (args.resume or init_checkpoint):
+        raise ValueError("phase2.full_guard requires --decoder-init-checkpoint on a new run")
     manifest, _ = _manifest(config, args.manifest)
     checkpoint = args.backbone_checkpoint or config["phase2"].get("backbone_checkpoint")
     if not checkpoint:
@@ -738,11 +762,39 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         phase1_model.backbone, phase1_model.normalizer, build_decoders(config)
     )
     del phase1_model, parent_payload
+    if init_checkpoint:
+        # Only decoder weights are needed; do not allocate the old optimizer on GPU.
+        initialized = load_checkpoint(init_checkpoint, "cpu")
+        metadata = initialized.get("metadata", {})
+        old_config = initialized.get("config", {})
+        if metadata.get("phase") != "latent_decoder_train" or metadata.get("pipeline_version") != 3:
+            raise ValueError("Decoder initialization must be a phase-2 checkpoint")
+        if metadata.get("configuration_hash") != configuration_hash(old_config, "phase2"):
+            raise ValueError("Decoder initialization config hash mismatch")
+        if metadata.get("manifest_hash") != manifest["meta"]["manifest_hash"]:
+            raise ValueError("Decoder initialization manifest differs")
+        if configuration_hash(old_config, "phase1") != configuration_hash(config, "phase1"):
+            raise ValueError("Decoder initialization uses a different phase-1 contract")
+        if metadata.get("frozen_backbone_hash") != state_dict_hash(system.backbone):
+            raise ValueError("Decoder initialization uses a different frozen backbone")
+        if metadata.get("frozen_normalizer_hash") != state_dict_hash(system.normalizer):
+            raise ValueError("Decoder initialization uses a different IMU normalizer")
+        prefix = "decoders."
+        decoder_state = {
+            key[len(prefix):]: value for key, value in initialized["system"].items()
+            if key.startswith(prefix)
+        }
+        system.decoders.load_state_dict(decoder_state, strict=True)
+        if metadata.get("decoder_current_hash") != state_dict_hash(system.decoders):
+            raise ValueError("Decoder initialization weights do not match checkpoint metadata")
+        del initialized
     trainer = Phase2Trainer(
         system, config, device, str(Path(checkpoint).resolve()), manifest["meta"]["manifest_hash"]
     )
     best_validation = math.inf
     best_blur_score = math.inf
+    best_guarded_score = math.inf
+    guard_reference = None
     if args.resume:
         payload = load_checkpoint(args.resume, device)
         if payload.get("metadata", {}).get("phase") != "latent_decoder_train":
@@ -764,6 +816,11 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         restore_rng_state(payload["rng"])
         best_validation = float(payload.get("best_joint_validation_score", math.inf))
         best_blur_score = float(payload.get("best_blur_validation_score", math.inf))
+        best_guarded_score = float(payload.get("best_guarded_blur_score", math.inf))
+        guard_reference = payload.get("guard_reference")
+        decoder_init_source = payload.get("decoder_init_checkpoint")
+        if "full_guard" in config["phase2"] and guard_reference is None:
+            raise ValueError("Guarded phase-2 resume checkpoint lacks its initialization reference")
 
     train_dataset = _dataset(config, manifest, "train", fixed_realization=False,
                              scenarios=config["phase2"].get("train_scenarios"))
@@ -785,11 +842,35 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     )
     output = Path(args.output or config["runtime"]["output_dir"]) / "phase2"
     _prepare_run(output, args.resume, trainer.successful_updates)
+    if "full_guard" in config["phase2"] and guard_reference is None:
+        if blur_loader is None:
+            raise ValueError("Guarded phase 2 needs blur validation")
+        guard_reference = {
+            "full": _evaluate_with_overlap(
+                system, validation_loader, validation_dataset, device,
+                config["runtime"]["validation_batches"],
+                config["phase2"]["smooth_l1_beta"],
+                forward_model=trainer.forward_model,
+            ),
+            "blur": _validate_active_blur(system, blur_loader, device,
+                                            forward_model=trainer.forward_model),
+        }
+        print(
+            "  guarded init reference"
+            f" | full PSNR {guard_reference['full']['image_psnr_db']:.2f}"
+            f" | SSIM {guard_reference['full']['image_ssim']:.3f}"
+            f" | accel {guard_reference['full']['accel_rmse']:.3f}"
+            f" | gyro {guard_reference['full']['gyro_rmse']:.3f}"
+            f" | blur MAE {guard_reference['blur']['image_mae_restored']:.5f}"
+            f" | edge {guard_reference['blur']['strong_edge_gradient_mae_restored']:.5f}"
+        )
     _write_resolved(config, output)
     write_json(output / "execution.json", execution)
     write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
     if blur_dataset is not None:
         write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
+    if guard_reference is not None:
+        write_json(output / "guard_reference.json", guard_reference)
     log = _Jsonl(output / "train.jsonl")
     maximum = config["phase2"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
@@ -805,6 +886,12 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Resume needs best_blur_validation.pt beside last.pt")
         import shutil
         shutil.copy2(prior_best_blur, output / "best_blur_validation.pt")
+    if args.resume and math.isfinite(best_guarded_score) and not (output / "best_guarded_validation.pt").exists():
+        prior_best_guarded = Path(args.resume).parent / "best_guarded_validation.pt"
+        if not prior_best_guarded.exists():
+            raise ValueError("Resume needs best_guarded_validation.pt beside last.pt")
+        import shutil
+        shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
     while trainer.successful_updates < maximum:
         group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
         metrics = trainer.step(group)
@@ -840,10 +927,19 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     float(blur["strong_edge_gradient_mae_restored"]) /
                     max(float(blur["strong_edge_gradient_mae_input"]), 1e-12),
                 )
+            guard_pass = False
+            guard_failures: list[str] = []
+            if guard_reference is not None:
+                guard_pass, guard_failures = _phase2_full_blur_guard(
+                    evaluation, blur, guard_reference, config["phase2"]["full_guard"]
+                )
             memory = _memory_mib()
             record = {"successful_updates": update, **memory, **validation, **blur_validation}
             if blur_loader is not None:
                 record["blur_validation_worst_ratio"] = blur_score
+            if guard_reference is not None:
+                record["guard_pass"] = guard_pass
+                record["guard_failures"] = guard_failures
             log.write(record)
             # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
             # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
@@ -873,6 +969,9 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     f" -> {blur_validation['blur_validation_strong_edge_gradient_mae_restored']:.5f}"
                     f" | worst ratio {blur_score:.3f}"
                 )
+            if guard_reference is not None:
+                print(f"  full+blur guard: {'PASS' if guard_pass else 'FAIL'}"
+                      f" | {', '.join(guard_failures) if guard_failures else 'all checks passed'}")
             payload = trainer.checkpoint_payload(serializable_config(config))
             improved = validation["validation_joint_validation_score"] < best_validation
             if improved:
@@ -880,15 +979,27 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             improved_blur = blur_score < best_blur_score
             if improved_blur:
                 best_blur_score = blur_score
+            improved_guarded = guard_pass and blur_score < best_guarded_score
+            if improved_guarded:
+                best_guarded_score = blur_score
             payload["best_joint_validation_score"] = best_validation
             if blur_loader is not None:
                 payload["best_blur_validation_score"] = best_blur_score
                 payload["blur_validation_metrics"] = blur_validation
+            if guard_reference is not None:
+                payload["guard_reference"] = guard_reference
+                payload["best_guarded_blur_score"] = best_guarded_score
+                payload["guard_pass"] = guard_pass
+                payload["guard_failures"] = guard_failures
+            if decoder_init_source is not None:
+                payload["decoder_init_checkpoint"] = decoder_init_source
             payload["validation_metrics"] = validation
             if improved:
                 atomic_torch_save(payload, output / "best_joint_validation.pt")
             if improved_blur:
                 atomic_torch_save(payload, output / "best_blur_validation.pt")
+            if improved_guarded:
+                atomic_torch_save(payload, output / "best_guarded_validation.pt")
             atomic_torch_save(payload, output / "last.pt")
     plot_training(output)
     print(f"Saved phase-2 checkpoints and training_curves.png: {output}")
@@ -1157,6 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase2.add_argument("--config")
     phase2.add_argument("--manifest")
     phase2.add_argument("--backbone-checkpoint")
+    phase2.add_argument("--decoder-init-checkpoint", help="Start a new phase-2 run from existing decoder weights")
     phase2.add_argument("--output")
     phase2.add_argument("--device")
     phase2.add_argument("--gpus", choices=("auto", "1", "2"), help="Override runtime.gpu_count; batch_size remains global")

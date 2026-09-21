@@ -1,0 +1,24 @@
+# Phase 2 run moi: khoi tao decoder tu checkpoint phase 2 cu, giu backbone cu.
+# Chi nhan checkpoint moi neu blur cai thien va full/full + IMU gan moc cu.
+extends: kaggle_tartanair_v2.yaml
+experiment_name: qwt_jepa_phase2_guarded_finetune
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p2_guarded_finetune
+  checkpoint_every_updates: 100
+
+phase2:
+  learning_rate: 0.00002
+  warmup_updates: 50
+  max_successful_updates: 1500
+  blur_validation_samples: 128
+  train_scenarios:
+    - {image_mode: full, imu_mode: full, weight: 0.75}
+    - {image_mode: blur_only, imu_mode: full, weight: 0.15}
+    - {image_mode: blur_only, imu_mode: clean, weight: 0.05}
+    - {image_mode: clean, imu_mode: clean, weight: 0.05}
+  full_guard:
+    max_psnr_drop_db: 0.2
+    max_ssim_drop: 0.01
+    max_accel_rmse_ratio: 1.03
+    max_gyro_rmse_ratio: 1.03

@@ -166,6 +166,18 @@ def validate_config(config: dict[str, Any]) -> None:
     if "blur_validation_samples" in phase2 and (not isinstance(phase2["blur_validation_samples"], int)
             or phase2["blur_validation_samples"] < 1):
         raise ValueError("phase2.blur_validation_samples must be a positive integer")
+    if "full_guard" in phase2:
+        guard = phase2["full_guard"]
+        required = {"max_psnr_drop_db", "max_ssim_drop", "max_accel_rmse_ratio", "max_gyro_rmse_ratio"}
+        if not isinstance(guard, dict) or set(guard) != required:
+            raise ValueError(f"phase2.full_guard needs exactly {sorted(required)}")
+        for key, value in guard.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                raise ValueError(f"phase2.full_guard.{key} must be finite")
+            if value < (1.0 if key.endswith("ratio") else 0.0):
+                raise ValueError(f"phase2.full_guard.{key} must be nonnegative or at least 1")
+        if "blur_validation_samples" not in phase2:
+            raise ValueError("phase2.full_guard requires blur_validation_samples")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
         raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
     if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":

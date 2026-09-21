@@ -140,3 +140,62 @@ def test_two_phase_cli_generates_kaggle_reports_and_preserves_best_on_resume(tmp
         assert image.width > 1000
     with pytest.raises(SystemExit):
         main(["train-phase1", *common])  # cannot silently append another run
+
+
+def test_guarded_phase2_starts_from_old_decoder_and_resumes(tmp_path, monkeypatch):
+    torch.set_num_threads(1)
+    root, manifest = tmp_path / "dataset", tmp_path / "manifest"
+    _write_dataset(root)
+    base = serializable_config(load_config("configs/smoke.yaml"))
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(yaml.safe_dump(base))
+    old_run, new_run = tmp_path / "old", tmp_path / "guarded"
+    main(["build-manifest", "--config", str(base_path), "--data-root", str(root),
+          "--output", str(manifest)])
+    main(["train-phase1", "--config", str(base_path), "--manifest", str(manifest),
+          "--output", str(old_run)])
+    parent = old_run / "phase1/last.pt"
+    main(["train-phase2", "--config", str(base_path), "--manifest", str(manifest),
+          "--output", str(old_run), "--backbone-checkpoint", str(parent)])
+    old_decoder = old_run / "phase2/best_joint_validation.pt"
+    old_hash = load_checkpoint(old_decoder)["metadata"]["decoder_current_hash"]
+
+    guarded = serializable_config(load_config(base_path))
+    guarded["phase2"].update(
+        max_successful_updates=2,
+        blur_validation_samples=4,
+        train_scenarios=[
+            {"image_mode": "full", "imu_mode": "full", "weight": 0.8},
+            {"image_mode": "blur_only", "imu_mode": "clean", "weight": 0.2},
+        ],
+        full_guard={"max_psnr_drop_db": 0.2, "max_ssim_drop": 0.01,
+                    "max_accel_rmse_ratio": 1.03, "max_gyro_rmse_ratio": 1.03},
+    )
+    guarded_path = tmp_path / "guarded.yaml"
+    guarded_path.write_text(yaml.safe_dump(guarded))
+    import qjepa.cli as cli
+    original_save = cli.atomic_torch_save
+
+    def interrupt_after_first(payload, path):
+        original_save(payload, path)
+        if path == new_run / "phase2/last.pt" and payload["successful_updates"] == 1:
+            raise RuntimeError("Simulated interruption after guarded checkpoint")
+
+    monkeypatch.setattr(cli, "atomic_torch_save", interrupt_after_first)
+    args = ["--config", str(guarded_path), "--manifest", str(manifest),
+            "--output", str(new_run), "--backbone-checkpoint", str(parent)]
+    with pytest.raises(SystemExit):
+        main(["train-phase2", *args, "--decoder-init-checkpoint", str(old_decoder)])
+    monkeypatch.setattr(cli, "atomic_torch_save", original_save)
+    last = new_run / "phase2/last.pt"
+    saved = load_checkpoint(last)
+    assert saved["metadata"]["decoder_initialization_hash"] == old_hash
+    assert saved["decoder_init_checkpoint"] == str(old_decoder.resolve())
+    assert saved["guard_reference"]["full"]["image_count"] == 4
+    assert saved["guard_reference"]["blur"]["active_frames"] > 0
+    assert (new_run / "phase2/guard_reference.json").is_file()
+    main(["train-phase2", *args, "--resume", str(last)])
+    resumed = load_checkpoint(last)
+    assert resumed["successful_updates"] == 2
+    assert resumed["decoder_init_checkpoint"] == str(old_decoder.resolve())
+    assert resumed["guard_reference"] == saved["guard_reference"]
