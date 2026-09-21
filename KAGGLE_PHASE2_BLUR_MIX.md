@@ -73,7 +73,22 @@ for name in ('best_joint_validation', 'best_blur_validation'):
           active['strong_edge_gradient_mae_restored'])
 ```
 
-Chỉ nhận mô hình mới nếu trên 256 ảnh blur thật cả MAE, lỗi cạnh, LH/HL đều giảm so với input, rồi kiểm tra full/full và IMU trên cùng validation bằng `qjepa evaluate`. Nếu không đạt, giữ checkpoint cũ và gửi lại hai JSON audit cùng kết quả full/full; chưa nên thay kiến trúc hay train lại phase 1 chỉ từ thử nghiệm này.
+Nếu có checkpoint vượt input trên ảnh blur, đánh giá full/full toàn bộ validation để so sánh trực tiếp với run cũ (PSNR 20.59 dB, SSIM 0.677, accel RMSE 0.807, gyro RMSE 0.077):
+
+```python
+CANDIDATE = OUT / 'phase2/best_blur_validation.pt'
+EVAL = OUT / 'eval_best_blur_full_valid'
+assert CANDIDATE.is_file()
+if not (EVAL / 'metrics.json').is_file():
+    subprocess.run([sys.executable, '-u', '-m', 'qjepa', 'evaluate',
+                    '--checkpoint', str(CANDIDATE), '--manifest', str(MANIFEST),
+                    '--split', 'valid', '--image-mode', 'full', '--imu-mode', 'full',
+                    '--device', 'cuda', '--output', str(EVAL), '--panels', '2'],
+                   cwd=SOURCE, env=env, check=True)
+print(json.dumps(json.loads((EVAL / 'metrics.json').read_text())['requested'], indent=2))
+```
+
+Chỉ nhận mô hình mới nếu trên 256 ảnh blur thật cả MAE, lỗi cạnh, LH/HL đều giảm so với input **và** full/full cùng IMU không tụt đáng kể so với checkpoint cũ. Nếu không đạt, giữ checkpoint cũ và gửi lại hai JSON audit cùng `eval_best_blur_full_valid/metrics.json`; chưa nên thay kiến trúc hay train lại phase 1 chỉ từ thử nghiệm này.
 
 Trước khi kết thúc phiên Kaggle, lưu run mới để không mất checkpoint:
 
