@@ -16,6 +16,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -100,6 +101,49 @@ def _add_bands(target: dict, values: dict) -> None:
         target[key] = [a + b for a, b in zip(target[key], values[key])]
 
 
+def _empty_bands() -> dict:
+    bands = {"coefficient_count_per_band": 0}
+    for key in ("clean_squared", "input_squared", "restored_squared",
+                "input_error_squared", "restored_error_squared"):
+        bands[key] = [0.0] * 4
+    return bands
+
+
+def _spread_indices(total: int, count: int) -> list[int]:
+    """Deterministically cover the entire split instead of its first trajectory."""
+    if total < 1 or count < 1:
+        raise ValueError("total and count must be positive")
+    count = min(count, total)
+    if count == 1:
+        return [total // 2]
+    return [round(index * (total - 1) / (count - 1)) for index in range(count)]
+
+
+def _record(
+    stats: dict, bands: dict, clean: torch.Tensor, noisy: torch.Tensor,
+    restored: torch.Tensor, clean_coefficients: torch.Tensor,
+    input_coefficients: torch.Tensor, output_coefficients: torch.Tensor,
+    zeroed: torch.Tensor | None = None,
+) -> None:
+    input_error = noisy - clean
+    restored_error = restored - clean
+    _accumulate(stats, {
+        "pixel_input_error_sum": float(input_error.abs().sum()),
+        "pixel_restored_error_sum": float(restored_error.abs().sum()),
+        "pixel_input_squared_error_sum": float(input_error.square().sum()),
+        "pixel_restored_squared_error_sum": float(restored_error.square().sum()),
+    })
+    _accumulate(stats, edge_components(clean, noisy, restored))
+    _add_bands(bands, _band_sums(clean_coefficients, input_coefficients,
+                                output_coefficients))
+    if zeroed is not None:
+        _accumulate(stats, {
+            "ablation_count": clean.numel(),
+            "ablation_full_mae_sum": float(restored_error.abs().sum()),
+            "ablation_zero_zi_mae_sum": float((zeroed - clean).abs().sum()),
+        })
+
+
 def _finish(stats: dict, bands: dict, samples: int, pixels: int) -> dict:
     edges = max(stats["edge_count"], 1)
     smooth = max(stats["smooth_count"], 1)
@@ -146,12 +190,16 @@ def _finish(stats: dict, bands: dict, samples: int, pixels: int) -> dict:
 
 
 def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Path,
-          split: str = "valid", batches: int = 16, device: str = "cuda") -> dict:
+          split: str = "valid", batches: int = 16, samples: int | None = None,
+          device: str = "cuda") -> dict:
     if batches < 1:
         raise ValueError("batches must be positive")
+    if samples is not None and samples < 1:
+        raise ValueError("samples must be positive")
     device_obj = torch.device(device)
     system, config = _system_from_phase2(str(checkpoint), device_obj)
     manifest = read_manifest(manifest_path)
+    indices = _spread_indices(len(manifest["samples"][split]), samples) if samples else None
     # Diagnostics should not spawn DataLoader workers or retain image batches.
     config["data"] = dict(config["data"], num_workers=0, pin_memory=False)
     report: dict[str, dict] = {}
@@ -159,16 +207,17 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
     for scenario, (image_mode, imu_mode) in SCENARIOS.items():
         dataset = _dataset(config, manifest, split, fixed_realization=True,
                            image_mode=image_mode, imu_mode=imu_mode)
-        loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
+        selected = Subset(dataset, indices) if indices is not None else dataset
+        loader = _loader(config, selected, config["phase2"]["batch_size"], train=False)
         stats: dict[str, float] = {}
-        bands: dict = {"coefficient_count_per_band": 0}
-        for key in ("clean_squared", "input_squared", "restored_squared",
-                    "input_error_squared", "restored_error_squared"):
-            bands[key] = [0.0] * 4
-        samples = pixels = 0
+        bands = _empty_bands()
+        active_stats: dict[str, float] = {}
+        active_bands = _empty_bands()
+        active_samples = active_pixels = 0
+        seen_samples = pixels = 0
         scenario_ids = []
         for index, raw in enumerate(loader):
-            if index >= batches:
+            if indices is None and index >= batches:
                 break
             scenario_ids.extend(raw["sample_id"])
             batch = _to_device(raw, device_obj)
@@ -182,40 +231,54 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
                     batch["image_noisy"].clamp(0, 1),
                     restored.image.clamp(0, 1),
                 )
-                input_error = noisy - clean
-                restored_error = output_image - clean
-                _accumulate(stats, {
-                    "pixel_input_error_sum": float(input_error.abs().sum()),
-                    "pixel_restored_error_sum": float(restored_error.abs().sum()),
-                    "pixel_input_squared_error_sum": float(input_error.square().sum()),
-                    "pixel_restored_squared_error_sum": float(restored_error.square().sum()),
-                })
-                _accumulate(stats, edge_components(clean, noisy, output_image))
-                _add_bands(bands, _band_sums(clean_coefficients,
-                                           latent.image_coefficients,
-                                           restored.image_coefficients))
+                zeroed_image = None
                 if scenario == "blur_only":
                     zeroed = system.decode(replace(latent, ZI=torch.zeros_like(latent.ZI)))
-                    _accumulate(stats, {
-                        "ablation_count": clean.numel(),
-                        "ablation_full_mae_sum": float(restored_error.abs().sum()),
-                        "ablation_zero_zi_mae_sum": float((zeroed.image.clamp(0, 1) - clean).abs().sum()),
-                    })
-                samples += clean.shape[0]
+                    zeroed_image = zeroed.image.clamp(0, 1)
+                _record(stats, bands, clean, noisy, output_image,
+                        clean_coefficients, latent.image_coefficients,
+                        restored.image_coefficients, zeroed_image)
+                if scenario == "blur_only":
+                    active = torch.tensor(
+                        [any(corruption["image"][key] for key in
+                             ("defocus", "motion", "downsample"))
+                         for corruption in raw["corruption"]],
+                        dtype=torch.bool, device=device_obj,
+                    )
+                    if active.any():
+                        _record(active_stats, active_bands, clean[active], noisy[active],
+                                output_image[active], clean_coefficients[active],
+                                latent.image_coefficients[active],
+                                restored.image_coefficients[active],
+                                zeroed_image[active])
+                        active_samples += int(active.sum())
+                        active_pixels += clean[active].numel()
+                seen_samples += clean.shape[0]
                 pixels += clean.numel()
-        if not samples:
+        if not seen_samples:
             raise ValueError("Validation loader returned no images")
         if first_sample_ids is None:
             first_sample_ids = scenario_ids
         elif scenario_ids != first_sample_ids:
             raise ValueError("Scenarios did not evaluate the same samples")
-        report[scenario] = _finish(stats, bands, samples, pixels)
+        report[scenario] = _finish(stats, bands, seen_samples, pixels)
+        if scenario == "blur_only":
+            report[scenario]["actual_blur_frames"] = active_samples
+            if active_samples:
+                report[scenario]["blur_active_only"] = _finish(
+                    active_stats, active_bands, active_samples, active_pixels,
+                )
 
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"checkpoint": str(checkpoint), "split": split,
-                                "batches": batches, "scenarios": report}, indent=2), encoding="utf-8")
+                                "batches": batches if indices is None else None,
+                                "spread_samples": len(indices) if indices is not None else None,
+                                "scenarios": report}, indent=2), encoding="utf-8")
     print("Image blur audit — cùng các frame valid, fixed realization; chỉ đọc checkpoint")
+    print("PSNR ở đây tính từ MSE gộp, không phải trung bình PSNR từng ảnh của evaluate.")
+    if indices is not None:
+        print(f"Mẫu rải đều trên toàn validation: {len(indices)} / {len(manifest['samples'][split])}")
     for name, result in report.items():
         print(f"\n{name}: {result['samples']} ảnh")
         print(f"  PSNR input → restored: {result['image_psnr_input_db']:.2f} → {result['image_psnr_restored_db']:.2f} dB")
@@ -236,6 +299,19 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
             a = result["zero_zi_ablation"]
             print(f"  Đặt ZI=0: MAE {a['mae_full']:.5f} → {a['mae_zero_zi']:.5f}"
                   f" ({a['mae_increase_pct_when_zeroed']:+.1f}%)")
+        if "blur_active_only" in result:
+            active = result["blur_active_only"]
+            print(f"  Frame có blur thật: {result['actual_blur_frames']}/{result['samples']}")
+            print(f"  Chỉ frame có blur: PSNR {active['image_psnr_input_db']:.2f}"
+                  f" → {active['image_psnr_restored_db']:.2f} dB"
+                  f" | MAE {active['image_mae_input']:.5f} → {active['image_mae_restored']:.5f}")
+            print(f"  Chỉ frame có blur: lỗi gradient {active['strong_edge_gradient_mae_input']:.5f}"
+                  f" → {active['strong_edge_gradient_mae_restored']:.5f}")
+            for band in ("LH", "HL", "HH"):
+                values = active["bands"][band]
+                print(f"    {band} RMSE input → restored:"
+                      f" {values['rmse_input_to_clean']:.5f} →"
+                      f" {values['rmse_restored_to_clean']:.5f}")
     print("\nDiễn giải: blur_only cần giảm lỗi gradient trên cạnh thật và giảm RMSE băng LH/HL.")
     print("Nếu RMS out gần clean nhưng RMSE/gradient không giảm, năng lượng tăng sai vị trí.")
     print(f"Đã lưu: {path}")
@@ -249,10 +325,12 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--split", default="valid", choices=("valid", "test"))
     parser.add_argument("--batches", type=int, default=16)
+    parser.add_argument("--samples", type=int,
+                        help="Spread this many frames across the whole split; overrides --batches")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     audit(args.checkpoint, args.manifest, output=args.output,
-          split=args.split, batches=args.batches, device=args.device)
+          split=args.split, batches=args.batches, samples=args.samples, device=args.device)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from tools.image_blur_audit import edge_components
+from tools.image_blur_audit import _spread_indices, edge_components
 
 
 def test_edge_error_detects_true_recovery_and_misplaced_edges():
@@ -21,3 +21,11 @@ def test_edge_error_detects_true_recovery_and_misplaced_edges():
     assert recovered["edge_input_error_sum"] > 0
     assert misplaced["edge_restored_error_sum"] > recovered["edge_restored_error_sum"]
     assert misplaced["edge_restored_sum"] < recovered["edge_restored_sum"]
+
+
+def test_spread_indices_cover_entire_validation_split():
+    indices = _spread_indices(8496, 256)
+    assert len(indices) == len(set(indices)) == 256
+    assert indices[0] == 0
+    assert indices[-1] == 8495
+    assert _spread_indices(3, 256) == [0, 1, 2]
