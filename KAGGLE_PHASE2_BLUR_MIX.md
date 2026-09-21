@@ -10,6 +10,7 @@ import os, subprocess, sys, yaml
 
 OLD = Path('/kaggle/working/qwt_jepa_version3')
 SOURCE = Path('/kaggle/working/qwt_jepa_blur_mix')
+SOURCE_COMMIT = '11c2c574789addf1c8126d49a0cce2400fa573c3'
 P1 = OLD / 'outputs/p1_detail2_trial/phase1/last.pt'
 MANIFEST = OLD / 'manifests/kaggle'
 OUT = OLD / 'outputs/p2_blur_mix_trial'
@@ -17,6 +18,8 @@ assert P1.is_file(), f'Khôi phục checkpoint phase 1 cũ: {P1}'
 assert (MANIFEST / 'meta.json').is_file(), f'Khôi phục manifest cũ: {MANIFEST}'
 if not SOURCE.exists():
     subprocess.run(['git', 'clone', 'https://github.com/leesanghyoek/qwt_jepa_ver3.git', str(SOURCE)], check=True)
+subprocess.run(['git', '-C', str(SOURCE), 'fetch', '--no-tags', 'origin', 'main'], check=True)
+subprocess.run(['git', '-C', str(SOURCE), 'checkout', '--detach', SOURCE_COMMIT], check=True)
 CONFIG = SOURCE / 'configs/kaggle_phase2_blur_mix.yaml'
 assert CONFIG.is_file(), f'Source chưa có thử nghiệm mới: {CONFIG}'
 saved_config = OLD / 'outputs/p1_detail2_trial/phase1/resolved_config.yaml'
@@ -71,3 +74,18 @@ for name in ('best_joint_validation', 'best_blur_validation'):
 ```
 
 Chỉ nhận mô hình mới nếu trên 256 ảnh blur thật cả MAE, lỗi cạnh, LH/HL đều giảm so với input, rồi kiểm tra full/full và IMU trên cùng validation bằng `qjepa evaluate`. Nếu không đạt, giữ checkpoint cũ và gửi lại hai JSON audit cùng kết quả full/full; chưa nên thay kiến trúc hay train lại phase 1 chỉ từ thử nghiệm này.
+
+Trước khi kết thúc phiên Kaggle, lưu run mới để không mất checkpoint:
+
+```python
+import zipfile
+from IPython.display import FileLink, display
+
+archive = Path('/kaggle/working/p2_blur_mix_trial.zip')
+with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_STORED) as bundle:
+    for path in sorted(OUT.rglob('*')):
+        if path.is_file():
+            bundle.write(path, path.relative_to(OUT.parent))
+print('Đã lưu:', archive)
+display(FileLink(str(archive)))
+```
