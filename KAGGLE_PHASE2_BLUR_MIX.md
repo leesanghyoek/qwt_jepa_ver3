@@ -85,7 +85,7 @@ for name in ('best_joint_validation', 'best_blur_validation'):
               bands[band]['rmse_input_to_clean'], '→',
               bands[band]['rmse_restored_to_clean'])
 
-PROFILE_REF = 'ed7c37c1f11449e032130dbf046d888447a799d3'
+PROFILE_REF = '715809563fafff5905708044bb5e7eaf83861bd1'
 subprocess.run(['git', '-C', str(SOURCE), 'fetch', '--no-tags', 'origin', 'main'], check=True)
 profile_source = subprocess.check_output(
     ['git', '-C', str(SOURCE), 'show', f'{PROFILE_REF}:tools/blur_failure_profile.py'],
