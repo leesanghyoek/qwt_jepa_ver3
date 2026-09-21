@@ -12,6 +12,8 @@ import torch
 import yaml
 
 from .corruptions import (
+    IMAGE_MODES,
+    IMU_MODES,
     ImuCorruptionConfig,
     LowLightImageCorruptionConfig,
     LowLightImageCorruptor,
@@ -149,6 +151,21 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.detail_energy_weight cannot be negative")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
+    scenarios = phase2.get("train_scenarios")
+    if scenarios is not None:
+        if not isinstance(scenarios, list) or not scenarios:
+            raise ValueError("phase2.train_scenarios must be a nonempty list")
+        for scenario in scenarios:
+            if not isinstance(scenario, dict) or set(scenario) != {"image_mode", "imu_mode", "weight"}:
+                raise ValueError("Each phase2.train_scenarios entry needs image_mode, imu_mode and weight")
+            if scenario["image_mode"] not in IMAGE_MODES or scenario["imu_mode"] not in IMU_MODES:
+                raise ValueError("Invalid phase2.train_scenarios corruption mode")
+            weight = scenario["weight"]
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not np.isfinite(weight) or weight <= 0:
+                raise ValueError("phase2.train_scenarios weights must be finite and positive")
+    if "blur_validation_samples" in phase2 and (not isinstance(phase2["blur_validation_samples"], int)
+            or phase2["blur_validation_samples"] < 1):
+        raise ValueError("phase2.blur_validation_samples must be a positive integer")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
         raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
     if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":

@@ -1,0 +1,16 @@
+# Thử nghiệm phase 2 riêng: giữ nguyên phase 1 p1_detail2_trial.
+# Chỉ đổi phân phối corruption trong phase 2 và đo blur thật khi checkpoint.
+extends: kaggle_tartanair_v2.yaml
+experiment_name: qwt_jepa_phase2_blur_mix
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p2_blur_mix_trial
+
+phase2:
+  max_successful_updates: 5000
+  blur_validation_samples: 128
+  train_scenarios:
+    - {image_mode: full, imu_mode: full, weight: 0.50}
+    - {image_mode: blur_only, imu_mode: full, weight: 0.25}
+    - {image_mode: blur_only, imu_mode: clean, weight: 0.15}
+    - {image_mode: clean, imu_mode: clean, weight: 0.10}

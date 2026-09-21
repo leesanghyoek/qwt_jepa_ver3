@@ -86,6 +86,7 @@ def _dataset(
     fixed_realization: bool,
     image_mode: str = "full",
     imu_mode: str = "full",
+    scenarios: list[dict[str, object]] | None = None,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -102,6 +103,8 @@ def _dataset(
         realization=config["data"]["validation_realization"] if fixed_realization else 0,
         image_mode=image_mode,
         imu_mode=imu_mode,
+        scenarios=scenarios,
+        scenario_seed=config["data"]["corruption_seed"],
     )
 
 
@@ -271,6 +274,63 @@ def _fixed_validation_bank(dataset: PairedCameraImuDataset, size: int) -> None:
         index = np.linspace(0, len(rows) - 1, count, dtype=int)
         selected.extend(rows[item] for item in index)
     dataset.samples = selected
+
+
+@torch.no_grad()
+def _validate_active_blur(
+    system: RestorationSystem, loader: DataLoader, device: torch.device,
+    forward_model: torch.nn.Module | None = None,
+) -> dict[str, float | int]:
+    """Evaluate only frames whose fixed blur corruption actually contains blur."""
+    system.eval()
+    pixel_input = pixel_restored = edge_input = edge_restored = 0.0
+    pixel_count = edge_count = active_frames = 0
+    for raw in loader:
+        active = torch.tensor([
+            any(item["image"][key] for key in ("defocus", "motion", "downsample"))
+            for item in raw["corruption"]
+        ], dtype=torch.bool, device=device)
+        if not active.any():
+            continue
+        batch = _to_device(raw, device)
+        inputs = (batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"])
+        restored = system(*inputs).image if forward_model is None else forward_model(*inputs)["image"]
+        clean, noisy, output_image = (
+            tensor[active].clamp(0, 1) for tensor in
+            (batch["image_clean"], batch["image_noisy"], restored)
+        )
+        pixel_input += float((noisy - clean).abs().sum())
+        pixel_restored += float((output_image - clean).abs().sum())
+        pixel_count += clean.numel()
+        active_frames += clean.shape[0]
+        greys = [tensor[:, :1] * 0.299 + tensor[:, 1:2] * 0.587 + tensor[:, 2:3] * 0.114
+                 for tensor in (clean, noisy, output_image)]
+        gradients = [
+            (grey[..., 1:] - grey[..., :-1], grey[..., 1:, :] - grey[..., :-1, :])
+            for grey in greys
+        ]
+        clean_x, clean_y = gradients[0]
+        magnitude = torch.nn.functional.pad(clean_x.abs(), (0, 1)) + torch.nn.functional.pad(clean_y.abs(), (0, 0, 0, 1))
+        threshold = torch.quantile(magnitude.flatten(1), 0.9, dim=1).view(-1, 1, 1, 1)
+        mask = magnitude > threshold
+        edge_count += int(mask.sum())
+        for gradient, name in ((gradients[1], "input"), (gradients[2], "restored")):
+            gx, gy = gradient
+            error = (torch.nn.functional.pad((gx - clean_x).abs(), (0, 1)) +
+                     torch.nn.functional.pad((gy - clean_y).abs(), (0, 0, 0, 1)))
+            if name == "input":
+                edge_input += float((error * mask).sum())
+            else:
+                edge_restored += float((error * mask).sum())
+    if active_frames == 0 or edge_count == 0:
+        raise ValueError("Blur validation bank contains no actual blurred edges")
+    return {
+        "active_frames": active_frames,
+        "image_mae_input": pixel_input / pixel_count,
+        "image_mae_restored": pixel_restored / pixel_count,
+        "strong_edge_gradient_mae_input": edge_input / edge_count,
+        "strong_edge_gradient_mae_restored": edge_restored / edge_count,
+    }
 
 
 def _write_resolved(config: dict[str, Any], output: Path) -> None:
@@ -682,6 +742,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         system, config, device, str(Path(checkpoint).resolve()), manifest["meta"]["manifest_hash"]
     )
     best_validation = math.inf
+    best_blur_score = math.inf
     if args.resume:
         payload = load_checkpoint(args.resume, device)
         if payload.get("metadata", {}).get("phase") != "latent_decoder_train":
@@ -702,11 +763,19 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Phase-2 resume checkpoint has inconsistent data progress")
         restore_rng_state(payload["rng"])
         best_validation = float(payload.get("best_joint_validation_score", math.inf))
+        best_blur_score = float(payload.get("best_blur_validation_score", math.inf))
 
-    train_dataset = _dataset(config, manifest, "train", fixed_realization=False)
+    train_dataset = _dataset(config, manifest, "train", fixed_realization=False,
+                             scenarios=config["phase2"].get("train_scenarios"))
     validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
     _fixed_validation_bank(validation_dataset, config["runtime"]["validation_batches"] * config["phase2"]["batch_size"])
     validation_loader = _loader(config, validation_dataset, config["phase2"]["batch_size"], train=False)
+    blur_dataset = blur_loader = None
+    if "blur_validation_samples" in config["phase2"]:
+        blur_dataset = _dataset(config, manifest, "valid", fixed_realization=True,
+                                image_mode="blur_only", imu_mode="clean")
+        _fixed_validation_bank(blur_dataset, config["phase2"]["blur_validation_samples"])
+        blur_loader = _loader(config, blur_dataset, config["phase2"]["batch_size"], train=False)
     batches = _training_batch_stream(
         config,
         train_dataset,
@@ -719,6 +788,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     _write_resolved(config, output)
     write_json(output / "execution.json", execution)
     write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+    if blur_dataset is not None:
+        write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
     log = _Jsonl(output / "train.jsonl")
     maximum = config["phase2"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
@@ -728,6 +799,12 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Resume needs best_joint_validation.pt beside last.pt; copy the complete phase2 folder")
         import shutil
         shutil.copy2(prior_best, output / "best_joint_validation.pt")
+    if args.resume and math.isfinite(best_blur_score) and not (output / "best_blur_validation.pt").exists():
+        prior_best_blur = Path(args.resume).parent / "best_blur_validation.pt"
+        if not prior_best_blur.exists():
+            raise ValueError("Resume needs best_blur_validation.pt beside last.pt")
+        import shutil
+        shutil.copy2(prior_best_blur, output / "best_blur_validation.pt")
     while trainer.successful_updates < maximum:
         group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
         metrics = trainer.step(group)
@@ -752,8 +829,22 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 forward_model=trainer.forward_model,
             )
             validation = {f"validation_{key}": value for key, value in evaluation.items()}
+            blur_validation = {}
+            blur_score = math.inf
+            if blur_loader is not None:
+                blur = _validate_active_blur(system, blur_loader, device,
+                                              forward_model=trainer.forward_model)
+                blur_validation = {f"blur_validation_{key}": value for key, value in blur.items()}
+                blur_score = max(
+                    float(blur["image_mae_restored"]) / max(float(blur["image_mae_input"]), 1e-12),
+                    float(blur["strong_edge_gradient_mae_restored"]) /
+                    max(float(blur["strong_edge_gradient_mae_input"]), 1e-12),
+                )
             memory = _memory_mib()
-            log.write({"successful_updates": update, **memory, **validation})
+            record = {"successful_updates": update, **memory, **validation, **blur_validation}
+            if blur_loader is not None:
+                record["blur_validation_worst_ratio"] = blur_score
+            log.write(record)
             # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
             # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
             # trong train.jsonl ma kernel dang bi chan khong doc duoc.
@@ -773,14 +864,31 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 f" | {'VUOT baseline' if beats else 'chua vuot'}"
                 f" | RSS {memory['rss_mib']:.0f}+{memory['children_rss_mib']:.0f} MiB"
             )
+            if blur_validation:
+                print(
+                    f"  blur actual={blur_validation['blur_validation_active_frames']}"
+                    f" | MAE {blur_validation['blur_validation_image_mae_input']:.5f}"
+                    f" -> {blur_validation['blur_validation_image_mae_restored']:.5f}"
+                    f" | edge {blur_validation['blur_validation_strong_edge_gradient_mae_input']:.5f}"
+                    f" -> {blur_validation['blur_validation_strong_edge_gradient_mae_restored']:.5f}"
+                    f" | worst ratio {blur_score:.3f}"
+                )
             payload = trainer.checkpoint_payload(serializable_config(config))
             improved = validation["validation_joint_validation_score"] < best_validation
             if improved:
                 best_validation = float(validation["validation_joint_validation_score"])
+            improved_blur = blur_score < best_blur_score
+            if improved_blur:
+                best_blur_score = blur_score
             payload["best_joint_validation_score"] = best_validation
+            if blur_loader is not None:
+                payload["best_blur_validation_score"] = best_blur_score
+                payload["blur_validation_metrics"] = blur_validation
             payload["validation_metrics"] = validation
             if improved:
                 atomic_torch_save(payload, output / "best_joint_validation.pt")
+            if improved_blur:
+                atomic_torch_save(payload, output / "best_blur_validation.pt")
             atomic_torch_save(payload, output / "last.pt")
     plot_training(output)
     print(f"Saved phase-2 checkpoints and training_curves.png: {output}")

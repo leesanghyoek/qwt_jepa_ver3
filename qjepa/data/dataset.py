@@ -11,6 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
+from ..corruptions.rng import derive_seed
 from .manifest import PairedSample
 from .tartanair import Trajectory
 
@@ -63,6 +64,8 @@ class PairedCameraImuDataset(Dataset):
         realization: int = 0,
         image_mode: str = "full",
         imu_mode: str = "full",
+        scenarios: list[dict[str, object]] | None = None,
+        scenario_seed: int = 0,
         cache_size: int = 4,
     ) -> None:
         if not samples:
@@ -74,6 +77,8 @@ class PairedCameraImuDataset(Dataset):
         self.realization = realization
         self.image_mode = image_mode
         self.imu_mode = imu_mode
+        self.scenarios = scenarios
+        self.scenario_seed = scenario_seed
         self.cache = _TrajectoryCache(cache_size)
 
     def set_realization(self, realization: int) -> None:
@@ -82,8 +87,20 @@ class PairedCameraImuDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _scenario_modes(self, sample: PairedSample) -> tuple[str, str]:
+        image_mode, imu_mode = self.image_mode, self.imu_mode
+        if self.scenarios:
+            rng = np.random.default_rng(derive_seed(
+                self.scenario_seed, "phase2_scenario", sample.sample_id, self.realization,
+            ))
+            weights = np.asarray([float(item["weight"]) for item in self.scenarios], dtype=np.float64)
+            choice = self.scenarios[int(rng.choice(len(weights), p=weights / weights.sum()))]
+            image_mode, imu_mode = str(choice["image_mode"]), str(choice["imu_mode"])
+        return image_mode, imu_mode
+
     def __getitem__(self, index: int) -> dict[str, object]:
         sample = self.samples[index]
+        image_mode, imu_mode = self._scenario_modes(sample)
         imu_all, imu_times_all = self.cache.get(sample)
         clean_image = load_rgb(sample.image_path, self.image_size)
         clean_imu = np.asarray(imu_all[sample.imu_start : sample.imu_end], dtype=np.float32)
@@ -95,7 +112,7 @@ class PairedCameraImuDataset(Dataset):
             trajectory=sample.trajectory_key,
             timestamp=sample.image_time,
             frame_index=sample.image_index,
-            mode=self.image_mode,
+            mode=image_mode,
         )
         noisy_imu, imu_parameters = self.imu_corruptor.window(
             imu_all,
@@ -105,7 +122,7 @@ class PairedCameraImuDataset(Dataset):
             split=sample.split,
             realization=self.realization,
             trajectory=sample.trajectory_key,
-            mode=self.imu_mode,
+            mode=imu_mode,
         )
         chw = lambda value: torch.from_numpy(np.ascontiguousarray(value.transpose(2, 0, 1))).float()
         return {
