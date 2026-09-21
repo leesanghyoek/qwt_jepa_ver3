@@ -16,7 +16,7 @@ GUARD_OUT = OLD_PROJECT / 'outputs/p2_guarded_finetune'
 P1 = OLD_PROJECT / 'outputs/p1_detail2_trial/phase1/last.pt'
 OLD_BEST = OLD_PROJECT / 'outputs/p1_detail2_trial/phase2/best_joint_validation.pt'
 MANIFEST = OLD_PROJECT / 'manifests/kaggle'
-SOURCE_COMMIT = 'REPLACE_WITH_SOURCE_COMMIT'
+SOURCE_COMMIT = 'ad5aa11d69b75b17866e66e401d88fa2ca60c087'
 for path in (P1, OLD_BEST, MANIFEST / 'meta.json'):
     assert path.is_file(), f'Cần khôi phục file cũ: {path}'
 if not GUARD_SOURCE.exists():
