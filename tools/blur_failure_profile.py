@@ -83,19 +83,25 @@ def profile(checkpoint: str | Path, manifest_path: str | Path, *, output: str | 
                 "downsample_scale": float(parameters["downsample_scale"]),
             })
     rows.sort(key=lambda row: (row["input_mae"], row["sample_id"]))
-    if len(rows) < 4:
-        raise ValueError("Fewer than four frames have actual blur")
+    if not rows:
+        raise ValueError("No sampled frames have actual blur")
     quartiles = {}
-    for index, selected in enumerate(np.array_split(np.arange(len(rows)), 4), start=1):
+    for index, selected in enumerate(np.array_split(np.arange(len(rows)), min(4, len(rows))), start=1):
         group = [rows[int(item)] for item in selected]
         quartiles[f"q{index}"] = {
             "input_mae_range": [group[0]["input_mae"], group[-1]["input_mae"]],
             **_summarize(group),
         }
+    by_operator = {
+        name: _summarize([row for row in rows if row[name]])
+        for name in ("defocus", "motion", "downsample")
+        if any(row[name] for row in rows)
+    }
     report = {
         "checkpoint": str(checkpoint), "split": split,
         "spread_samples": len(indices), "actual_blur_frames": len(rows),
         "overall": _summarize(rows), "input_mae_quartiles": quartiles,
+        "by_operator_nonexclusive": by_operator,
         "frames": rows,
     }
     path = Path(output)
@@ -108,6 +114,12 @@ def profile(checkpoint: str | Path, manifest_path: str | Path, *, output: str | 
             f" | MAE {result['input_mae']:.5f} -> {result['restored_mae']:.5f}"
             f" | better {result['fraction_mae_better']:.1%}"
             f" | edge {result['input_edge_error']:.5f} -> {result['restored_edge_error']:.5f}"
+        )
+    for name, result in by_operator.items():
+        print(
+            f"{name:>10} n={result['frames']:>3}"
+            f" | MAE {result['input_mae']:.5f} -> {result['restored_mae']:.5f}"
+            f" | better {result['fraction_mae_better']:.1%}"
         )
     return report
 

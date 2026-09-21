@@ -73,6 +73,38 @@ for name in ('best_joint_validation', 'best_blur_validation'):
           active['strong_edge_gradient_mae_restored'])
 ```
 
+Nếu MAE vẫn cao hơn input dù lỗi cạnh đã giảm, xem LH/HL/HH sẵn có trong hai JSON, rồi phân tích từng frame theo mức blur. Cell sau chỉ đọc checkpoint, không train:
+
+```python
+for name in ('best_joint_validation', 'best_blur_validation'):
+    report = json.loads((OUT / 'diagnostics' / f'{name}_blur_spread_256.json').read_text())
+    bands = report['scenarios']['blur_only']['blur_active_only']['bands']
+    print(name)
+    for band in ('LH', 'HL', 'HH'):
+        print(band, 'RMSE input → restored:',
+              bands[band]['rmse_input_to_clean'], '→',
+              bands[band]['rmse_restored_to_clean'])
+
+PROFILE_REF = 'ed7c37c1f11449e032130dbf046d888447a799d3'
+subprocess.run(['git', '-C', str(SOURCE), 'fetch', '--no-tags', 'origin', 'main'], check=True)
+profile_source = subprocess.check_output(
+    ['git', '-C', str(SOURCE), 'show', f'{PROFILE_REF}:tools/blur_failure_profile.py'],
+    text=True,
+)
+PROFILE_SCRIPT = OUT / 'diagnostics/blur_failure_profile.py'
+PROFILE_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+PROFILE_SCRIPT.write_text(profile_source)
+for name in ('best_joint_validation', 'best_blur_validation'):
+    profile_json = OUT / 'diagnostics' / f'{name}_blur_profile_256.json'
+    subprocess.run([sys.executable, '-u', str(PROFILE_SCRIPT),
+                    '--checkpoint', str(OUT / 'phase2' / f'{name}.pt'),
+                    '--manifest', str(MANIFEST), '--samples', '256',
+                    '--device', 'cuda', '--output', str(profile_json)],
+                   cwd=SOURCE, env=env, check=True)
+```
+
+`q1` có sai lệch input so với ảnh sạch thấp nhất, `q4` cao nhất. Đây là độ khó đo bằng ảnh sạch, không nhất thiết là độ mạnh quang học của blur, và không thể dùng trực tiếp ở lúc suy luận. Các nhóm `defocus`, `motion`, `downsample` có thể chồng lấn. Nếu chỉ `q4` được cải thiện, cần tìm cách tránh sửa quá tay khi input đã gần sạch. Nếu cả bốn nhóm đều thua input, trộn thêm blur trong train chưa giải quyết được sai số tái tạo.
+
 Nếu có checkpoint vượt input trên ảnh blur, đánh giá full/full toàn bộ validation để so sánh trực tiếp với run cũ (PSNR 20.59 dB, SSIM 0.677, accel RMSE 0.807, gyro RMSE 0.077):
 
 ```python
