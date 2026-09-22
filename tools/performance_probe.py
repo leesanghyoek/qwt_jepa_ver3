@@ -1,9 +1,9 @@
-"""Time the real phase-2 data loader and optimizer step without saving a checkpoint.
+"""Time the real training data loader and optimizer step without saving a checkpoint.
 
-Run this in a separate process on Kaggle after training has stopped. The loaded
-decoder is updated in memory for a few steps; the source checkpoint is untouched.
-Use identical --workers and --updates with --gpus 1 and 2 to measure whether
-DataParallel helps a four-image microbatch on the available hardware.
+Use --config to benchmark a fresh phase-1 run before any checkpoint exists, or
+--checkpoint to benchmark phase 2. Weights are updated only in memory. Run this
+in a separate process while actual training is stopped. Compare the same
+--workers and --updates with --gpus 1 and 2.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _memory_mib, _system_from_phase2, _training_batch_stream
+from qjepa.config import build_normalizer, build_phase1_model, load_config, seed_everything
 from qjepa.data import read_manifest
+from qjepa.training.phase1 import Phase1Trainer
 from qjepa.training.phase2 import Phase2Trainer
 
 
@@ -32,38 +34,54 @@ def _summary(values: list[float]) -> dict[str, float]:
     }
 
 
-def probe(checkpoint: Path, manifest_path: Path, *, gpus: int, workers: int,
-          updates: int, warmup: int, output: Path | None = None) -> dict:
-    if gpus not in (1, 2) or workers < 0 or updates < 1 or warmup < 0:
-        raise ValueError("Use --gpus 1/2, --workers >= 0, --updates >= 1, --warmup >= 0")
+def probe(checkpoint: Path | None, manifest_path: Path, *, config_path: Path | None = None,
+          gpus: int, workers: int,
+          updates: int, warmup: int, start_update: int = 0,
+          output: Path | None = None) -> dict:
+    if gpus not in (1, 2) or workers < 0 or updates < 1 or warmup < 0 or start_update < 0:
+        raise ValueError("Use --gpus 1/2, --workers >= 0, --updates >= 1, --warmup >= 0, --start-update >= 0")
     if not torch.cuda.is_available():
         raise RuntimeError("This training performance probe requires CUDA")
+    if (checkpoint is None) == (config_path is None):
+        raise ValueError("Pass exactly one of --config (phase 1) or --checkpoint (phase 2)")
     device = torch.device("cuda")
-    system, config = _system_from_phase2(str(checkpoint), device)
+    manifest = read_manifest(manifest_path)
+    if checkpoint is None:
+        phase = "phase1"
+        config = load_config(config_path)
+        seed_everything(config[phase]["initialization_seed"])
+    else:
+        phase = "phase2"
+        system, config = _system_from_phase2(str(checkpoint), device)
     config["data"] = dict(config["data"], num_workers=workers)
     config["runtime"] = dict(config["runtime"], gpu_count=gpus)
-    manifest = read_manifest(manifest_path)
+    if phase == "phase1":
+        model = build_phase1_model(config, build_normalizer(manifest["meta"]))
+        trainer = Phase1Trainer(model, config, device, manifest["meta"]["manifest_hash"])
+    else:
+        trainer = Phase2Trainer(
+            system, config, device,
+            parent_checkpoint="performance_probe_only",
+            manifest_hash=manifest["meta"]["manifest_hash"],
+        )
+    trainer.successful_updates = start_update
     dataset = _dataset(
         config, manifest, "train", fixed_realization=False,
-        scenarios=config["phase2"].get("train_scenarios"),
+        scenarios=config["phase2"].get("train_scenarios") if phase == "phase2" else None,
     )
+    accumulation = config[phase]["gradient_accumulation"]
     stream = _training_batch_stream(
-        config, dataset, config["phase2"]["batch_size"],
-        start_microbatch=0, namespace="phase2",
+        config, dataset, config[phase]["batch_size"],
+        start_microbatch=start_update * accumulation,
+        namespace=phase,
     )
-    trainer = Phase2Trainer(
-        system, config, device,
-        parent_checkpoint="performance_probe_only",
-        manifest_hash=manifest["meta"]["manifest_hash"],
-    )
-    accumulation = config["phase2"]["gradient_accumulation"]
     waits: list[float] = []
     steps: list[float] = []
     for index in range(warmup + updates):
         start = time.perf_counter()
         batches = [next(stream) for _ in range(accumulation)]
         loaded = time.perf_counter()
-        result = trainer.step(batches)
+        result = trainer.step(batches[0] if phase == "phase1" else batches)
         torch.cuda.synchronize()
         finished = time.perf_counter()
         if result.get("skipped"):
@@ -73,12 +91,15 @@ def probe(checkpoint: Path, manifest_path: Path, *, gpus: int, workers: int,
             steps.append(finished - loaded)
     elapsed = sum(waits) + sum(steps)
     report = {
-        "checkpoint": str(checkpoint),
+        "phase": phase,
+        "checkpoint": str(checkpoint) if checkpoint is not None else None,
+        "config": str(config_path) if config_path is not None else None,
         "gpus": gpus,
         "workers": workers,
         "pin_memory": bool(config["data"]["pin_memory"]),
-        "batch_size_per_microbatch": config["phase2"]["batch_size"],
+        "batch_size_per_microbatch": config[phase]["batch_size"],
         "gradient_accumulation": accumulation,
+        "start_update": start_update,
         "warmup_updates": warmup,
         "measured_updates": updates,
         "data_wait": _summary(waits),
@@ -96,16 +117,22 @@ def probe(checkpoint: Path, manifest_path: Path, *, gpus: int, workers: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--checkpoint", type=Path, help="Existing phase-2 checkpoint")
+    source.add_argument("--config", type=Path, help="Resolved config; benchmark fresh phase 1")
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--gpus", required=True, type=int, choices=(1, 2))
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--updates", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--start-update", type=int, default=0,
+                        help="Simulate a later phase schedule, such as phase-1 sensitivity after update 500")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    probe(args.checkpoint, args.manifest, gpus=args.gpus, workers=args.workers,
-          updates=args.updates, warmup=args.warmup, output=args.output)
+    probe(args.checkpoint, args.manifest, config_path=args.config,
+          gpus=args.gpus, workers=args.workers,
+          updates=args.updates, warmup=args.warmup, start_update=args.start_update,
+          output=args.output)
 
 
 if __name__ == "__main__":
