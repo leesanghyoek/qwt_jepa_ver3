@@ -113,6 +113,11 @@ class PairedCameraImuDataset(Dataset):
             timestamp=sample.image_time,
             frame_index=sample.image_index,
             mode=image_mode,
+            # The CLEAN gyro drives the blur: the true motion is what smears the
+            # frame, while the IMU branch only ever sees a noisy measurement of
+            # it. That gap is the task the decoder has to close.
+            gyro=clean_imu[:, 3:6].astype(np.float64),
+            imu_times=imu_times,
         )
         noisy_imu, imu_parameters = self.imu_corruptor.window(
             imu_all,

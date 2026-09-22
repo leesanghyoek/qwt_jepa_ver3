@@ -52,7 +52,8 @@ class Phase1Forward(nn.Module):
         self.model = model
 
     def forward(self, image_noisy, imu_noisy_phys, image_clean, imu_clean_phys,
-                image_time, imu_times, probe=None, probe_source="off") -> dict[str, torch.Tensor]:
+                image_time, imu_times, probe_noise=None, probe_signal=None,
+                probe_source="off") -> dict[str, torch.Tensor]:
         noisy = self.model.encode_online(image_noisy, imu_noisy_phys, image_time, imu_times)
         clean = self.model.encode_online(image_clean, imu_clean_phys, image_time, imu_times)
         prediction_i, prediction_u = self.model.predictions(noisy)
@@ -74,11 +75,16 @@ class Phase1Forward(nn.Module):
             result["reconstruction_imu"] = imu_coefficients
             result["reconstruction_image_target"] = target_image
             result["reconstruction_imu_target"] = target_imu
-        if probe is not None:
+        # Two probes share one encoder forward each; the base point they are
+        # measured against is FI_clean/FU_clean above, already computed.
+        probes = {"probe_noise_feature": probe_noise, "probe_signal_feature": probe_signal}
+        for name, probe in probes.items():
+            if probe is None:
+                continue
             if probe_source == "image":
-                result["probe_feature"] = self.model.backbone.encode_image_dense(probe)
+                result[name] = self.model.backbone.encode_image_dense(probe)
             elif probe_source == "imu":
-                result["probe_feature"] = self.model.backbone.encode_imu_dense(probe)
+                result[name] = self.model.backbone.encode_imu_dense(probe)
             else:
                 raise ValueError("A probe requires image or imu probe_source")
         return result

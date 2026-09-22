@@ -20,6 +20,7 @@ from .corruptions import (
     TrajectoryImuCorruptor,
 )
 from .data.normalize import ImuNormalizer
+from .transforms import QWT_BACKENDS
 from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
 
 
@@ -62,8 +63,10 @@ def validate_config(config: dict[str, Any]) -> None:
     model = config["model"]
     if str(config["runtime"].get("gpu_count", "auto")) not in {"auto", "1", "2"}:
         raise ValueError("runtime.gpu_count must be auto, 1 or 2")
-    if model.get("image_transform") != "qwt_dualtree_db4" or model.get("imu_transform") != "haar1d":
-        raise ValueError("v3 supports qwt_dualtree_db4 for RGB and haar1d for IMU")
+    if model.get("image_transform") not in QWT_BACKENDS or model.get("imu_transform") != "haar1d":
+        raise ValueError(
+            f"model.image_transform must be one of {sorted(QWT_BACKENDS)} and imu_transform haar1d"
+        )
     if model.get("time_metadata_dim") != 3 or model.get("imu_summary_bins") != 4:
         raise ValueError("v3 fusion requires three time metadata values and four IMU summary bins")
     if run_kind == "main":
@@ -221,6 +224,7 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
         time_metadata_dim=model["time_metadata_dim"],
         gate_bias=model["gate_bias_init"],
         groups=model["groupnorm_groups"],
+        image_transform=model["image_transform"],
     )
 
 

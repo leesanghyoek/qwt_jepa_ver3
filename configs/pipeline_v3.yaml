@@ -29,7 +29,11 @@ data:
   validation_realization: 0
 
 model:
-  image_transform: qwt_dualtree_db4
+  # Cap loc Hilbert thuc su, 14 tap, nang luong tan so am 0.0677 — thap hon 2,68
+  # lan so voi tran 0.1814 ma MOI bo loc dung chung mot filter lech so nguyen deu
+  # dung yen o do. Dat qwt_dualtree_db4 de chay nhanh ablation voi backend cu.
+  # Doi gia tri nay LAM HONG checkpoint phase 1 cu: bieu dien dau vao thay doi.
+  image_transform: qwt_dualtree_hilbert
   imu_transform: haar1d
   encoder_channels: [32, 64, 96, 128]
   embedding_dim: 128
@@ -51,6 +55,18 @@ corruption:
     vignette_strength: [0.0, 0.45]
     defocus_probability: 0.68
     defocus_sigma_px: [0.30, 1.45]
+    # Blur duoc TICH PHAN tu chinh gyro sach ma model nhan ban nhieu cua no.
+    # Truoc day motion_length/motion_angle boc ngau nhien, nen cua so IMU khong
+    # mang mot bit thong tin nao ve cach anh bi lam mo — nhanh IMU co the bi xoa
+    # khoi model ma metric anh gan nhu khong doi. Dat false de chay ablation.
+    motion_from_imu: true
+    exposure_seconds: [0.008, 0.030]
+    exposure_tracks_darkness: true
+    focal_length_px: 128.0     # 640 px @ 90 deg FOV -> f=320, resize 256 -> f=128
+    angular_gain: 1.0          # chinh do nang cua blur ma KHONG pha tuong quan IMU
+    motion_path_samples: 25
+    motion_max_radius_px: 16.0
+    # Chi dung khi motion_from_imu: false.
     motion_probability: 0.55
     motion_length_px: [3, 9]
     downsample_probability: 0.32
@@ -134,7 +150,25 @@ encoder_sensitivity:
   imu_normalized_epsilon: 0.01
   alpha: 1.0
   minimum_energy: 1.0e-12
-  weight_max: 0.0001
+  # Truoc: 1e-4 tren mot so hang co do lon ~1e-2, tuc dong gop bi nuot trong lam
+  # tron khi JEPA ~0.65. Khoi Jacobian cu KHONG tac dong gi do duoc — va khong the
+  # nang len, vi no phat do nhay DANG HUONG, tuc keo thang ve collapse.
+  # So hang moi la log(gain_nhieu / gain_tin_hieu): khong thu nguyen, collapse lam
+  # ca hai ve 0 nen ti so dung yen. Vi vay no nang len duoc that.
+  # 0.05 la diem xuat phat; doc sensitivity_noise_gain / sensitivity_signal_gain
+  # trong log roi chinh, dung giu nguyen vi tin so nay.
+  weight_max: 0.05
+  # Chan duoi cho log-ratio. Khong co no muc tieu VO HAN DUOI: khong gi ngan
+  # optimizer keo ti so ve 0 mai mai, va mot so hang phu khong chan canh tranh voi
+  # JEPA qua hang nghin update la cach mot run di lech ma khong ai nhin ra.
+  # log(0.02) = -3.912, tuc "dung day them khi encoder da diec gap 50 lan".
+  #
+  # Do tren 30 update dau, du lieu that (24k sample TartanAir), CPU:
+  #   nhanh ANH : ratio 0.05..0.26  -> da nhay voi tin hieu hon nhieu 4..20 lan
+  #   nhanh IMU : ratio 1.0..3.3    -> NHAY VOI NHIEU NGANG HOAC HON tin hieu
+  # Tuc khoi nay ton tai chu yeu vi nhanh IMU. Dieu do khop voi bat doi xung da
+  # biet cua bai toan: anh can THEM tan so cao, IMU can BOT.
+  floor_log_ratio: -3.912
   start_after_updates: 500
   ramp_updates: 1000
   probe_seed: 73129

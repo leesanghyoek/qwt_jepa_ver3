@@ -18,10 +18,12 @@ from .losses import (
 )
 from .schedules import ema_momentum, warmup_cosine_lr
 from .sensitivity import (
-    encoder_sensitivity_loss,
+    corruption_direction,
+    detail_direction,
+    directional_gain,
     make_probe,
+    sensitivity_ratio_loss,
     sensitivity_weight,
-    stateless_rademacher,
 )
 
 
@@ -55,6 +57,10 @@ class Phase1Trainer:
         "covariance",
         "encoder_sensitivity",
         "encoder_sensitivity_weight",
+        "sensitivity_noise_gain",
+        "sensitivity_signal_gain",
+        "sensitivity_ratio",
+        "sensitivity_valid_fraction",
         "reconstruction",
         "reconstruction_image",
         "reconstruction_image_detail",
@@ -122,28 +128,42 @@ class Phase1Trainer:
             ramp_updates=self.sensitivity["ramp_updates"],
             maximum=self.sensitivity["weight_max"],
         ) if self.sensitivity["enabled"] else 0.0
-        source, perturbed, energy = "off", None, None
+        source = "off"
+        probe_noise = probe_signal = probe_valid = None
+        noise_energy = signal_energy = None
         clipped_fraction = 0.0
         if encoder_weight > 0:
             source = "image" if self.successful_updates % 2 == 0 else "imu"
-            probe_input = (batch["image_noisy"] if source == "image"
-                           else self.model.normalizer.normalize(batch["imu_noisy_phys"]))
-            direction = stateless_rademacher(
-                probe_input, self.sensitivity["probe_seed"], self.successful_updates,
-                source, *tuple(batch.get("sample_id", ())),
-            )
-            perturbed, energy, clipped_fraction = make_probe(
-                probe_input, source, direction,
+            if source == "image":
+                base_input = batch["image_clean"]
+                noisy_input = batch["image_noisy"]
+            else:
+                base_input = self.model.normalizer.normalize(batch["imu_clean_phys"])
+                noisy_input = self.model.normalizer.normalize(batch["imu_noisy_phys"])
+            # Both probes start from the CLEAN operating point, whose features the
+            # variance term already computes, so the base costs nothing extra.
+            probe_kwargs = dict(
                 image_epsilon=self.sensitivity["image_epsilon"],
                 imu_epsilon=self.sensitivity["imu_normalized_epsilon"],
-                alpha=self.sensitivity["alpha"], minimum_energy=self.sensitivity["minimum_energy"],
+                alpha=self.sensitivity["alpha"],
+                minimum_energy=self.sensitivity["minimum_energy"],
+            )
+            noise_direction, noise_valid = corruption_direction(base_input, noisy_input)
+            signal_direction, signal_valid = detail_direction(base_input)
+            # A sample the corruptor left clean has no noise direction to measure.
+            probe_valid = noise_valid & signal_valid
+            probe_noise, noise_energy, clipped_fraction = make_probe(
+                base_input, source, noise_direction, **probe_kwargs
+            )
+            probe_signal, signal_energy, _ = make_probe(
+                base_input, source, signal_direction, **probe_kwargs
             )
         # Gather dense features, not per-device scalar losses. Statistics below
         # see all B samples even when each GPU processed only B/2 samples.
         features = self.forward_model(
             batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
             batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
-            probe=perturbed, probe_source=source,
+            probe_noise=probe_noise, probe_signal=probe_signal, probe_source=source,
         )
         jepa, jepa_image, jepa_imu = jepa_latent_loss(
             features["prediction_i"], features["prediction_u"], features["target_i"], features["target_u"]
@@ -201,15 +221,21 @@ class Phase1Trainer:
             self.decoder_forward_calls += 1
 
         encoder_term = jepa.new_zeros(())
-        gain_mean = 0.0
+        sensitivity_report: dict[str, float] = {}
         if encoder_weight > 0:
-            encoder_term, gains = encoder_sensitivity_loss(
-                features["FI" if source == "image" else "FU"],
-                features["probe_feature"],
-                energy,
-                eps=self.sensitivity["layer_norm_eps"],
+            # Base point is the clean feature, matching the clean probes above.
+            base = features["FI_clean" if source == "image" else "FU_clean"]
+            eps = self.sensitivity["layer_norm_eps"]
+            noise_gain = directional_gain(
+                base, features["probe_noise_feature"], noise_energy, eps=eps
             )
-            gain_mean = float(gains.mean())
+            signal_gain = directional_gain(
+                base, features["probe_signal_feature"], signal_energy, eps=eps
+            )
+            encoder_term, sensitivity_report = sensitivity_ratio_loss(
+                noise_gain, signal_gain, probe_valid,
+                floor_log_ratio=self.sensitivity.get("floor_log_ratio"),
+            )
 
         total = (
             self.phase["jepa_weight"] * jepa
@@ -246,7 +272,7 @@ class Phase1Trainer:
             "encoder_sensitivity": float(encoder_term.detach()),
             **reconstruction_parts,
             "encoder_sensitivity_weight": encoder_weight,
-            "encoder_sensitivity_gain": gain_mean,
+            **sensitivity_report,
             "encoder_source": source,
             "probe_clipped_fraction": clipped_fraction,
             "gradient_norm": float(gradient_norm),

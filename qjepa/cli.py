@@ -1189,6 +1189,9 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
             trajectory=f"synthetic/{sample}",
             timestamp=float(time.mean()),
             frame_index=sample,
+            # Same contract as the real dataset: the clean gyro drives the blur.
+            gyro=imu_clean[:, 3:6].astype(np.float64),
+            imu_times=time,
         )
         noisy_imu, _ = imu_corruptor.window(
             imu_clean,

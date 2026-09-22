@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+from .motion import imu_blur_kernel
 from .rng import generator
 
 IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_only")
@@ -34,6 +35,20 @@ class LowLightImageCorruptionConfig:
     defocus_sigma_px: tuple[float, float] = (0.30, 1.45)
     motion_probability: float = 0.55
     motion_length_px: tuple[int, int] = (3, 9)
+    # Motion blur integrated from the IMU the model also sees; see motion.py.
+    # `motion_probability`/`motion_length_px`/`motion_angle` above only apply when
+    # this is off, and that mode exists to ablate the coupling, not to run blind.
+    motion_from_imu: bool = True
+    exposure_seconds: tuple[float, float] = (0.008, 0.030)
+    # A darker frame means the shutter stayed open longer, so low light and heavy
+    # blur arrive together instead of being drawn independently.
+    exposure_tracks_darkness: bool = True
+    # TartanAir V2 lcam_front: 640 px at 90 deg FOV -> f = 320 px, and load_rgb
+    # rescales to 256 px, so f = 128 px. Override if the crop or camera changes.
+    focal_length_px: float = 128.0
+    angular_gain: float = 1.0
+    motion_path_samples: int = 25
+    motion_max_radius_px: float = 16.0
     downsample_probability: float = 0.32
     downsample_scale: tuple[float, float] = (0.72, 0.96)
     photon_count: tuple[float, float] = (550.0, 4000.0)
@@ -53,6 +68,19 @@ class LowLightImageCorruptionConfig:
             raise ValueError("exposure_gain must stay in (0,1]")
         if self.photon_count[0] <= 0:
             raise ValueError("photon_count must be positive")
+        low, high = self.exposure_seconds
+        if not 0 < low <= high:
+            raise ValueError("exposure_seconds must satisfy 0 < low <= high")
+        if high >= 0.1:
+            raise ValueError("exposure_seconds must stay below the 10 Hz frame period")
+        if self.focal_length_px <= 0:
+            raise ValueError("focal_length_px must be positive")
+        if self.angular_gain <= 0:
+            raise ValueError("angular_gain must be positive")
+        if self.motion_max_radius_px <= 0:
+            raise ValueError("motion_max_radius_px must be positive")
+        if self.motion_path_samples < 3:
+            raise ValueError("motion_path_samples must be at least 3")
 
 
 def _motion_kernel(length: int, angle_radians: float) -> np.ndarray:
@@ -115,11 +143,22 @@ class LowLightImageCorruptor:
         rng = generator(self.master_seed, "image_parameters", split, realization, trajectory, segment)
         cfg = self.config
         clean = mode == "clean" or (mode == "full" and rng.random() < cfg.clean_probability)
+        exposure_gain = float(rng.uniform(*cfg.exposure_gain))
+        exposure_seconds = float(rng.uniform(*cfg.exposure_seconds))
+        if cfg.exposure_tracks_darkness:
+            gain_low, gain_high = cfg.exposure_gain
+            span = gain_high - gain_low
+            # brightness 0 = darkest draw -> longest shutter.
+            brightness = (exposure_gain - gain_low) / span if span > 0 else 0.5
+            low, high = cfg.exposure_seconds
+            exposure_seconds = float(high - brightness * (high - low))
         parameters: dict[str, object] = {
             "mode": mode,
             "clean": bool(clean),
             "segment": segment,
-            "exposure_gain": float(rng.uniform(*cfg.exposure_gain)),
+            "exposure_gain": exposure_gain,
+            "exposure_seconds": exposure_seconds,
+            "motion_from_imu": bool(cfg.motion_from_imu),
             "tone_gamma": float(rng.uniform(*cfg.tone_gamma)),
             "white_balance": rng.uniform(*cfg.white_balance_gain, size=3).tolist(),
             "black_level": float(rng.uniform(*cfg.black_level)),
@@ -151,11 +190,20 @@ class LowLightImageCorruptor:
         timestamp: float,
         frame_index: int,
         mode: str = "full",
+        gyro: np.ndarray | None = None,
+        imu_times: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
         if image_clean.ndim != 3 or image_clean.shape[-1] != 3:
             raise ValueError(f"Expected image [H,W,3], got {image_clean.shape}")
         if not np.isfinite(image_clean).all() or image_clean.min() < 0 or image_clean.max() > 1:
             raise ValueError("Clean image must be finite and in [0,1]")
+        if self.config.motion_from_imu and (gyro is None or imu_times is None):
+            # Falling back to a random draw here would quietly undo the coupling
+            # the whole design rests on, so refuse instead.
+            raise ValueError(
+                "motion_from_imu is enabled but no gyro/imu_times were supplied; "
+                "pass the clean gyro window or set motion_from_imu: false"
+            )
         params = self._parameters(split, realization, trajectory, timestamp, mode)
         if params["clean"]:
             return image_clean.astype(np.float32, copy=True), params
@@ -169,8 +217,27 @@ class LowLightImageCorruptor:
             image = ndimage.gaussian_filter(
                 image, sigma=(params["defocus_sigma"], params["defocus_sigma"], 0), mode="reflect"
             )
-        if optical and params["motion"]:
+        kernel = None
+        if optical and self.config.motion_from_imu:
+            kernel, report = imu_blur_kernel(
+                np.asarray(gyro, dtype=np.float64),
+                np.asarray(imu_times, dtype=np.float64),
+                float(timestamp),
+                float(params["exposure_seconds"]),
+                focal_length_px=self.config.focal_length_px,
+                angular_gain=self.config.angular_gain,
+                samples=self.config.motion_path_samples,
+                max_radius_px=self.config.motion_max_radius_px,
+            )
+            params.update(report)
+            # A still camera yields a 1x1 kernel; skip the convolution rather than
+            # spend it on an identity.
+            params["motion"] = bool(kernel.shape[0] > 1)
+            if kernel.shape[0] == 1:
+                kernel = None
+        elif optical and params["motion"]:
             kernel = _motion_kernel(int(params["motion_length"]), float(params["motion_angle"]))
+        if kernel is not None:
             image = np.stack(
                 [ndimage.convolve(image[..., channel], kernel, mode="reflect") for channel in range(3)],
                 axis=-1,

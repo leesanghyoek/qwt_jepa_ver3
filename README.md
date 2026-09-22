@@ -23,14 +23,53 @@ Repository này triển khai pipeline hai giai đoạn theo
 - [Sơ đồ kiến trúc chi tiết và quy trình train](KIEN_TRUC_VA_QUY_TRINH_TRAIN.md).
 - [Kết quả kiểm tra code và giới hạn còn lại](CODE_REVIEW_KAGGLE.md).
 
-Backend ảnh hiện dùng bốn cây db4 dịch pha nguyên và pack 48 kênh. Round-trip đã
-được kiểm thử; **chưa xác minh tương đương QWT reference/Hilbert pair**. Tên API
-`qwt_dualtree_db4` được giữ để tương thích, không phải bằng chứng QWT chuẩn.
+Backend ảnh mặc định là `qwt_dualtree_hilbert`: **cặp Hilbert thật**, thiết kế
+bằng liệt kê phân tích phổ (`tools/design_hilbert_pair.py`), 14 tap, đo được
+**năng lượng tần số âm 0,0677** — thấp hơn 2,68 lần so với trần **0,1814** mà
+backend cũ `qwt_dualtree_db4` đứng yên ở đó. Trần này là cấu trúc, không phải
+vấn đề chọn wavelet: hai cây dùng *cùng* một filter lệch số nguyên luôn cho
+`W_B(ω) = W_A(ω)·e^{-jωd}`, nên dư lượng chỉ phụ thuộc phép dịch — đo được
+**đúng 0,1804 cho db2…db20, mọi symlet và mọi coiflet**. Backend cũ vẫn chọn
+được để chạy ablation. Xem `tests/test_qwt_analyticity.py`.
+
+## Thay đổi lần này — và những gì nó làm mất hiệu lực
+
+Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳng định.
+
+| | Trước | Sau | Đo bằng |
+|---|---|---|---|
+| **QWT** | 4 cây db4 lệch 1 mẫu. Không phải cặp Hilbert; năng lượng tần số âm **0,1814** | Cặp Hilbert thiết kế riêng, 14 tap, **0,0677** (tốt hơn 2,68×) | `tests/test_qwt_analyticity.py` |
+| **Blur ảnh** | `motion_length`/`motion_angle` bốc ngẫu nhiên, **độc lập với IMU** | Tích phân gyro sạch trên thời gian phơi sáng | `tests/test_imu_motion_blur.py` |
+| **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
+
+**Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
+phân phối blur đã đổi, nên checkpoint phase 1 cũ không còn so sánh được. Đây là
+đứt gãy thật, không phải đổi tên: `model.image_transform` là một phần của
+configuration hash.
+
+**Chạy ba lệnh này trước khi train:**
+
+```bash
+# 1. Xác nhận hình học gyro→camera trên chính dataset của bạn
+python3 tools/imu_blur_axis_check.py --data-root <root> --trajectories 12
+
+# 2. Xem lại thiết kế bộ lọc (và đổi bậc nếu muốn)
+python3 tools/design_hilbert_pair.py --orders 4 6 7 8
+
+# 3. Toàn bộ test
+python3 -m pytest tests/ -q
+```
+
+**Ablation có sẵn, không cần sửa code:** đặt `model.image_transform:
+qwt_dualtree_db4` để quay về transform cũ, và `corruption.image.motion_from_imu:
+false` để quay về blur ngẫu nhiên. Hai công tắc đó chính là nhánh control cho
+bảng so sánh trong báo cáo.
 
 ## Luồng tổng quát
 
 ```mermaid
 flowchart LR
+    G[Gyro sạch] -.-> |"tích phân trên thời gian phơi sáng<br/>= kernel blur"| N
     N[Ảnh và IMU nhiễu] --> B[QWT/Haar + online encoders + fusion]
     B --> Z[Dense latent ZI/ZU]
     C[Ảnh và IMU sạch] --> T[EMA teacher encoders]
@@ -79,7 +118,7 @@ flowchart TB
     XN["<b>Ảnh nhiễu</b> · 3 × 256 × 256"]
     UN["<b>IMU nhiễu</b> · 6 × 128"]
     TM["Timestamp cam + IMU<br/>metadata 3 chiều"]
-    QW["<b>QWT dual-tree db4</b> · 0 tham số<br/>3 màu × 4 băng × 4 thành phần<br/>Ci = 48 × 128 × 128"]
+    QW["<b>QWT dual-tree Hilbert</b> · 0 tham số<br/>3 màu × 4 băng × 4 thành phần<br/>Ci = 48 × 128 × 128"]
     HA["<b>Haar 1-D trực chuẩn</b> · 0 tham số<br/>6 kênh × 2 băng<br/>Cu = 12 × 64"]
     EI["<b>Encoder ảnh</b> · 4 stage · 0,75 M<br/>32×128×128 → 64×64×64 → 96×32×32<br/><b>FI = 128 × 16 × 16</b>"]
     EU["<b>Encoder IMU</b> · 4 stage · 0,25 M<br/>32×64 → 64×32 → 96×16<br/><b>FU = 128 × 8</b>"]
@@ -110,7 +149,7 @@ flowchart TB
     AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>cùng kiến trúc decoder phase 2<br/>bị vứt khi phase 1 kết thúc"]
     JE(["<b>JEPA loss</b> · trọng số 1,0<br/>online nhiễu ≈ teacher sạch"])
     VC(["<b>Variance 1,0 + Covariance 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch"])
-    JA(["<b>Encoder sensitivity</b> Jacobian<br/>Hutchinson + Rademacher<br/>bật sau update 500 · ramp 1000"])
+    JA(["<b>Encoder sensitivity</b> Jacobian<br/>log(gain nhiễu / gain tín hiệu)<br/>bật sau update 500 · ramp 1000"])
     ANL(["<b>Anchor loss · 0,45</b><br/>+ băng chi tiết 2,0"])
     CLEAN --> TE --> JE
     Z --> PR --> JE
@@ -201,7 +240,9 @@ từ chối sample vi phạm thay vì âm thầm căn lệch.
 Hai biến đổi này **khả nghịch và không có tham số học được**; chúng chỉ đổi hệ
 toạ độ.
 
-**Ảnh — QWT dual-tree db4, 1 mức.** Bốn cây db4 dịch pha nguyên chạy song song.
+**Ảnh — QWT dual-tree Hilbert, 1 mức.** Bốn cây chạy song song; dọc mỗi trục tín
+hiệu đi qua cây `A` hoặc cây `B`, và cây B là **bản đảo thời gian** của cây A —
+chính phép đảo đó tạo độ trễ nửa mẫu mà một phép dịch số nguyên không thể tạo ra.
 Gói kênh theo thứ tự `[màu, băng, thành phần]`:
 
 ```
@@ -287,9 +328,38 @@ vị trí, token IMU là `8` vị trí. Nó dự đoán latent của teacher t�
 **Decoder neo**: cùng kiến trúc decoder phase 2 nhưng **hệ số tuyệt đối**, chấm
 điểm trên hệ số wavelet sạch, trọng số 0,45. Bị vứt sau phase 1.
 
-**Encoder sensitivity (khối Jacobian)**: ước lượng Hutchinson bằng sai phân hữu
-hạn với probe Rademacher, đo trên dense feature **trước fusion**, bật sau update
-500 và ramp trong 1000 update.
+**Encoder sensitivity (khối Jacobian)** — *đã viết lại*. Bản cũ đo **một** hướng
+Rademacher ngẫu nhiên rồi tối thiểu hoá gain đó: một phạt co **đẳng hướng**, tức
+bảo encoder bớt nhạy với *mọi thứ*, kéo thẳng về collapse. Nó chỉ sống được ở
+trọng số `1e-4`, nơi nó không tác động gì đo được.
+
+Bản mới đo **hai** gain quanh cùng một điểm sạch, theo hai hướng có nghĩa:
+
+- `g_noise` — hướng mà corruption **thực sự** đã đẩy mẫu này đi, `noisy − clean`.
+- `g_signal` — phần tần số cao của mẫu sạch, tức thứ decoder phải dựng lại.
+
+Loss là `log(g_noise) − log(g_signal)`, **không thứ nguyên**: collapse đưa cả hai
+về 0 và tỉ số đứng yên, nên khác bản cũ, số hạng này không thưởng cho collapse và
+nâng trọng số lên được thật (`weight_max: 0.05`). Có `floor_log_ratio` chặn dưới
+để nó ngừng đẩy khi encoder đã đủ điếc — không có chặn thì mục tiêu vô hạn dưới.
+
+Mẫu bị corruptor bỏ qua (`clean_probability`) không có hướng nhiễu để đo, nên bị
+loại khỏi trung bình; `sensitivity_valid_fraction` báo tỉ lệ còn lại. Điểm gốc là
+**đầu vào sạch**, mà feature của nó phase 1 đã tính sẵn cho variance/covariance,
+nên chi phí thêm là hai forward encoder chứ không phải ba.
+
+**Đo 30 update đầu trên dữ liệu thật (24.314 sample TartanAir):**
+
+| nhánh | `g_noise` | `g_signal` | tỉ số | đọc là |
+|---|---|---|---|---|
+| ảnh | 1,1 – 25 | 21 – 101 | **0,05 – 0,26** | đã nhạy với tín hiệu hơn nhiễu 4–20 lần |
+| IMU | 0,9 – 12,7 | 0,9 – 4,2 | **1,0 – 3,3** | **nhạy với nhiễu ngang hoặc hơn tín hiệu** |
+
+Đây là kết quả đáng chú ý nhất của lần đo: **khối này tồn tại chủ yếu vì nhánh
+IMU**, không phải nhánh ảnh. Encoder IMU đang để nhiễu lấn át tín hiệu, đúng với
+bất đối xứng đã biết của bài toán — ảnh cần *thêm* tần số cao, IMU cần *bớt*. Một
+con số như vậy không thể đọc ra từ khối Jacobian cũ, vì nó chỉ trả về một gain
+đơn không có gì để so sánh.
 
 ### Phase 2 — decoder
 
@@ -386,16 +456,34 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
   Khởi tạo sao cho đóng góp skip ban đầu bằng 0, nên sàn identity không bị phá. Upsample bằng sub-pixel conv (pixel
   shuffle) thay cho nội suy bilinear, vì bilinear là bộ lọc thông thấp nên không
   sinh được tần số cao. Ở chế độ residual, head zero-init và cộng vào hệ số input.
-- `qjepa/corruptions/image.py`: blur quang học, blur chuyển động, giảm độ phân
-  giải, exposure thấp, gamma, white balance, vignette, shot/read/row noise, hot
-  pixel, lượng tử và JPEG. Mỗi frame bốc tham số riêng nên độ sáng và độ nhoè
-  thay đổi giữa các frame, không phải một hệ số cố định cho cả segment.
+- `qjepa/corruptions/motion.py`: **blur chuyển động tích phân từ chính gyro sạch**
+  mà model nhận bản nhiễu của nó. Trước đây `motion_length`/`motion_angle` bốc
+  ngẫu nhiên, nên cửa sổ IMU không mang **một bit nào** về cách ảnh bị làm mờ —
+  có thể xoá hẳn nhánh IMU mà metric ảnh gần như không đổi. Hình học được **đo**
+  chứ không giả định (`tools/imu_blur_axis_check.py`): hệ `lcam_front` trùng hệ
+  body của IMU, tương quan ≥ 0,9998 và slope 1,00 trên 12 trajectory. Do đó
+  `gyro_z` (yaw) → dịch ngang, `gyro_y` (pitch) → dịch dọc, `gyro_x` (roll) là
+  xoay trong mặt phẳng — **không** gộp vào kernel vì một kernel tích chập không
+  biểu diễn được nó, và được báo riêng ở `roll_radians`.
+
+  Phân phối thực tế, đo trên 400 sample train ngẫu nhiên: trung vị **1,08 px**,
+  p90 **3,11 px**, tối đa **9,62 px**; `Data_easy` trung bình 1,06 px,
+  `Data_hard` 2,35 px. Bốc ngẫu nhiên kiểu cũ cho trung bình ~1,8 px, nên độ nặng
+  gần tương đương — cái đổi là blur **tương quan** với IMU chứ không phải độc
+  lập. `angular_gain` chỉnh độ nặng mà **không** phá tương quan đó.
+- `qjepa/corruptions/image.py`: blur quang học, giảm độ phân giải, exposure thấp,
+  gamma, white balance, vignette, shot/read/row noise, hot pixel, lượng tử và
+  JPEG. Mỗi frame bốc tham số riêng nên độ sáng và độ nhoè thay đổi giữa các
+  frame. `exposure_tracks_darkness` nối thời gian phơi sáng với độ tối: frame tối
+  hơn nghĩa là màn trập mở lâu hơn, nên thiếu sáng và nhoè mạnh đến **cùng lúc**
+  thay vì được bốc độc lập.
 - `qjepa/corruptions/imu.py`: bandwidth blur, scale/cross-axis error, white noise
   có gain thay đổi theo thời gian, rung băng hẹp 8–45 Hz, spike, dropout và lượng
   tử. Bias instability bị **gate** sau `wander_probability: 0.25`: phần lớn window
   dao động *quanh* tín hiệu sạch, chỉ thỉnh thoảng mới lệch đi.
 - `qjepa/training/phase1.py`: noisy-to-clean latent prediction, teacher EMA,
-  variance/covariance trên tám raw maps và finite-difference Jacobian trước fusion.
+  variance/covariance trên tám raw maps, và Jacobian **bất đẳng hướng** trước
+  fusion — tỉ số độ nhạy nhiễu / độ nhạy tín hiệu, xem mục trên.
 - `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro, cộng hai số hạng
   tần số cao. **Băng chi tiết** (LH/HL/HH của ảnh và nửa detail của Haar IMU,
   trọng số `2.0`) vì L1 pixel tối ưu về trung vị có điều kiện, mà với bài toán

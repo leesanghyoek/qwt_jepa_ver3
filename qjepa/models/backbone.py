@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..transforms import HaarTransform1D, QuaternionWaveletTransform2D, TransformLayout
+from ..transforms import (
+    DEFAULT_QWT_BACKEND,
+    HaarTransform1D,
+    QuaternionWaveletTransform2D,
+    TransformLayout,
+)
 from .encoders import DEFAULT_CHANNELS, DenseCoefficientEncoder
 from .fusion import SharedGatedFusion, build_time_metadata
 
@@ -41,11 +46,12 @@ class MultimodalBackbone(nn.Module):
         time_metadata_dim: int = 3,
         gate_bias: float = -2.0,
         groups: int = 8,
+        image_transform: str = DEFAULT_QWT_BACKEND,
     ) -> None:
         super().__init__()
         if channels[-1] != embedding_dim:
             raise ValueError("The final encoder width must equal embedding_dim")
-        self.image_transform = QuaternionWaveletTransform2D()
+        self.image_transform = QuaternionWaveletTransform2D(backend=image_transform)
         self.imu_transform = HaarTransform1D(channels=6)
         self.image_encoder = DenseCoefficientEncoder(
             self.image_transform.coeff_channels, channels, dim=2, groups=groups

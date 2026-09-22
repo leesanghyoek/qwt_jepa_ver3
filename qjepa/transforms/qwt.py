@@ -1,13 +1,40 @@
-"""Experimental one-level redundant shifted-db4 transform for RGB.
+"""One-level dual-tree quaternion wavelet transform for RGB.
 
-Each RGB channel is processed independently by four separable db4 trees. The
-trees are packed into slots named ``(real, i, j, k)``. Every component is
-an orthonormal transform under periodic extension; synthesis averages the four
-reconstructions. Packing is RGB x 4 bands x 4 components = 48 real channels.
+Each RGB channel is analysed by four separable trees. Along each axis the signal
+passes through one of two filter banks, ``A`` or ``B``, and the four combinations
+are packed as the quaternion components ``(real, i, j, k)``:
 
-The paired trees use integer shifts of the same filters. Hilbert-pair/QWT
-reference equivalence has NOT been established. The legacy class/backend names
-are retained for API compatibility; round-trip tests only verify invertibility.
+    q = f_AA + i * f_BA + j * f_AB + k * f_BB
+
+which is the standard dual-tree construction: ``i`` carries the Hilbert transform
+along x, ``j`` along y, and ``k`` along both. Packing is
+RGB x 4 bands x 4 components = 48 real channels.
+
+What decides whether this is a quaternion wavelet transform at all is whether
+tree B's wavelet is the Hilbert transform of tree A's. If it is, the quaternion
+modulus is nearly shift invariant and the three phases encode sub-pixel
+displacement -- the property that makes the transform worth its four-fold cost,
+and the one that links it to an IMU, which measures exactly that displacement.
+
+Two backends are available and both are measured, never assumed:
+
+``qwt_dualtree_db4``
+    The original: one db4 filter used in both trees, offset by one sample. This
+    is *not* a Hilbert pair. Two trees running the same filter at an integer
+    offset satisfy ``W_B(w) = W_A(w) e^{-jwd}``, so the analytic residual is fixed
+    by the shift alone and is identical for every orthonormal wavelet -- measured
+    at 0.1804 negative-frequency energy for db2 through db20, every symlet and
+    every coiflet tried. It is a structural ceiling, not a tuning problem. Kept
+    selectable so the new transform has a control arm to be compared against.
+
+``qwt_dualtree_hilbert``
+    A filter pair designed for this transform by direct minimisation of
+    negative-frequency energy over orthonormal filter banks; see
+    ``tools/design_hilbert_pair.py`` for the design and
+    ``tests/test_qwt_analyticity.py`` for the measurement.
+
+Both backends are orthonormal per tree under periodic extension, so each tree
+inverts exactly and synthesis averages the four reconstructions.
 """
 
 from __future__ import annotations
@@ -20,11 +47,10 @@ import torch.nn.functional as F
 
 from .layout import TransformLayout, fp32_transform
 
-BACKEND = "qwt_dualtree_db4"
-REVISION = "1.0.0"
 BAND_ORDER = ("approx", "detail_y", "detail_x", "detail_xy")
 COMPONENT_ORDER = ("real", "i", "j", "k")
 CHANNEL_ORDER = ("R", "G", "B")
+
 DB4_H0 = (
     0.23037781330885523,
     0.7148465705525415,
@@ -36,6 +62,45 @@ DB4_H0 = (
     -0.010597401784997278,
 )
 
+# Designed Hilbert pair, 14 taps, measured negative-frequency energy 0.0677 --
+# 2.68x below the 0.1814 ceiling that any integer-shifted single filter is stuck
+# at. Regenerate with `python3 tools/design_hilbert_pair.py --orders 4 6 7 8`.
+#
+# Tree B came out of the search as the exact time-reversal of tree A, which is the
+# q-shift / Farras structure arrived at independently: reversing a spectral factor
+# negates its phase response, and that is what supplies the half-sample delay an
+# integer shift cannot. Both trees are orthonormal, so each inverts on its own.
+HILBERT_TREE_A = (
+    0.017376403426887545,
+    0.056826755006918264,
+    0.05875724493357679,
+    0.13753686415006175,
+    0.5098526634073375,
+    0.7315488782878448,
+    0.25879152712708775,
+    -0.2711118340076547,
+    -0.17919011734188073,
+    0.06347856039627707,
+    0.04670174870514969,
+    -0.012757197858304687,
+    -0.005182689071610881,
+    0.001584755211404701,
+)
+HILBERT_TREE_B = tuple(reversed(HILBERT_TREE_A))
+HILBERT_OFFSETS = (0, 2)
+
+# backend -> (tree A lowpass, tree B lowpass, (offset A, offset B), revision)
+FILTER_BANKS: dict[str, tuple[tuple[float, ...], tuple[float, ...], tuple[int, int], str]] = {
+    "qwt_dualtree_db4": (DB4_H0, DB4_H0, (0, 1), "1.0.0"),
+    "qwt_dualtree_hilbert": (HILBERT_TREE_A, HILBERT_TREE_B, HILBERT_OFFSETS, "2.0.0"),
+}
+DEFAULT_BACKEND = "qwt_dualtree_hilbert"
+QWT_BACKENDS = tuple(FILTER_BANKS)
+
+# Retained so existing imports keep resolving; the active backend is per-instance.
+BACKEND = DEFAULT_BACKEND
+REVISION = FILTER_BANKS[DEFAULT_BACKEND][3]
+
 
 def _qmf(h0: torch.Tensor) -> torch.Tensor:
     sign = torch.tensor([(-1.0) ** n for n in range(h0.numel())], dtype=h0.dtype)
@@ -46,6 +111,7 @@ def _analysis_1d(x: torch.Tensor, filt: torch.Tensor, offset: int) -> torch.Tens
     n, taps = x.shape[-1], filt.numel()
     shape = x.shape
     flat = x.reshape(-1, 1, n)
+    offset = offset % n
     needed = offset + taps - 1
     repetitions = math.ceil(needed / n) + 2
     periodic = flat.repeat(1, 1, repetitions)[..., : n + needed]
@@ -57,6 +123,7 @@ def _analysis_1d(x: torch.Tensor, filt: torch.Tensor, offset: int) -> torch.Tens
 
 def _synthesis_1d(x: torch.Tensor, filt: torch.Tensor, offset: int, n: int) -> torch.Tensor:
     shape = x.shape
+    offset = offset % n
     wide = F.conv_transpose1d(
         x.reshape(-1, 1, shape[-1]), filt.view(1, 1, -1), stride=2
     )
@@ -93,37 +160,53 @@ def _synthesis_axis(
 
 
 class QuaternionWaveletTransform2D(nn.Module):
-    def __init__(self, levels: int = 1) -> None:
+    def __init__(self, levels: int = 1, backend: str = DEFAULT_BACKEND) -> None:
         super().__init__()
         if levels != 1:
             raise ValueError("Only one QWT level is supported")
+        if backend not in FILTER_BANKS:
+            raise ValueError(f"Unknown QWT backend {backend!r}; have {sorted(FILTER_BANKS)}")
+        tree_a, tree_b, offsets, revision = FILTER_BANKS[backend]
+        if len(tree_a) != len(tree_b):
+            raise ValueError("Both trees must use filters of the same length")
         # Keep canonical taps in float64 so numerical reference tests do not
         # inherit float32 rounding. They are cast to the input dtype per call.
-        h0 = torch.tensor(DB4_H0, dtype=torch.float64)
-        self.register_buffer("h0", h0)
-        self.register_buffer("h1", _qmf(h0))
+        for name, taps in (("a", tree_a), ("b", tree_b)):
+            h0 = torch.tensor(taps, dtype=torch.float64)
+            self.register_buffer(f"h0_{name}", h0)
+            self.register_buffer(f"h1_{name}", _qmf(h0))
+        self.backend = backend
+        self.revision = revision
+        self.offsets = tuple(int(value) for value in offsets)
         self.levels = levels
 
     @property
     def coeff_channels(self) -> int:
         return 48
 
+    def _trees(self, dtype: torch.dtype):
+        """(h0, h1, offset) for tree A then tree B, cast to the working dtype."""
+        return (
+            (self.h0_a.to(dtype), self.h1_a.to(dtype), self.offsets[0]),
+            (self.h0_b.to(dtype), self.h1_b.to(dtype), self.offsets[1]),
+        )
+
     def layout_for(self, shape: tuple[int, int, int, int]) -> TransformLayout:
         b, c, h, w = shape
         if c != 3 or h % 2 or w % 2:
             raise ValueError(f"Expected [B,3,even H,even W], got {shape}")
         return TransformLayout(
-            backend=BACKEND,
-            revision=REVISION,
+            backend=self.backend,
+            revision=self.revision,
             original_shape=shape,
             coefficient_shape=(b, 48, h // 2, w // 2),
             levels=1,
             boundary_mode="periodic",
-            scale_convention="orthonormal_db4_mean_of_four_trees",
+            scale_convention="orthonormal_mean_of_four_trees",
             band_order=BAND_ORDER,
             component_order=COMPONENT_ORDER,
             channel_order=CHANNEL_ORDER,
-            extra={"filter": "db4", "tree_shift_samples": 1},
+            extra={"tree_offsets": list(self.offsets), "taps": int(self.h0_a.numel())},
         )
 
     @fp32_transform
@@ -132,13 +215,13 @@ class QuaternionWaveletTransform2D(nn.Module):
             raise ValueError(f"Expected [B,3,H,W], got {tuple(x.shape)}")
         layout = self.layout_for(tuple(x.shape))
         b, _, h, w = x.shape
-        h0, h1 = self.h0.to(x.dtype), self.h1.to(x.dtype)
+        trees = self._trees(x.dtype)
         out = x.new_empty(b, 3, 4, 4, h // 2, w // 2)
-        for tree_x, offset_x in enumerate((0, 1)):
-            low_x, high_x = _analysis_axis(x, h0, h1, offset_x, -1)
-            for tree_y, offset_y in enumerate((0, 1)):
-                ll, lh = _analysis_axis(low_x, h0, h1, offset_y, -2)
-                hl, hh = _analysis_axis(high_x, h0, h1, offset_y, -2)
+        for tree_x, (h0x, h1x, offset_x) in enumerate(trees):
+            low_x, high_x = _analysis_axis(x, h0x, h1x, offset_x, -1)
+            for tree_y, (h0y, h1y, offset_y) in enumerate(trees):
+                ll, lh = _analysis_axis(low_x, h0y, h1y, offset_y, -2)
+                hl, hh = _analysis_axis(high_x, h0y, h1y, offset_y, -2)
                 component = tree_x + 2 * tree_y
                 out[:, :, 0, component] = ll
                 out[:, :, 1, component] = lh
@@ -148,21 +231,52 @@ class QuaternionWaveletTransform2D(nn.Module):
 
     @fp32_transform
     def synthesis(self, coeff: torch.Tensor, layout: TransformLayout) -> torch.Tensor:
-        layout.require(BACKEND, REVISION)
+        layout.require(self.backend, self.revision)
         b, c, h, w = layout.original_shape
         if c != 3 or tuple(coeff.shape) != (b, 48, h // 2, w // 2):
             raise ValueError(f"Coefficient shape {tuple(coeff.shape)} does not match layout")
-        h0, h1 = self.h0.to(coeff.dtype), self.h1.to(coeff.dtype)
+        trees = self._trees(coeff.dtype)
         packed = coeff.reshape(b, 3, 4, 4, h // 2, w // 2)
         result = torch.zeros((b, 3, h, w), dtype=coeff.dtype, device=coeff.device)
-        for tree_x, offset_x in enumerate((0, 1)):
-            for tree_y, offset_y in enumerate((0, 1)):
+        for tree_x, (h0x, h1x, offset_x) in enumerate(trees):
+            for tree_y, (h0y, h1y, offset_y) in enumerate(trees):
                 component = tree_x + 2 * tree_y
                 ll = packed[:, :, 0, component]
                 lh = packed[:, :, 1, component]
                 hl = packed[:, :, 2, component]
                 hh = packed[:, :, 3, component]
-                low_x = _synthesis_axis(ll, lh, h0, h1, offset_y, h, -2)
-                high_x = _synthesis_axis(hl, hh, h0, h1, offset_y, h, -2)
-                result.add_(_synthesis_axis(low_x, high_x, h0, h1, offset_x, w, -1))
+                low_x = _synthesis_axis(ll, lh, h0y, h1y, offset_y, h, -2)
+                high_x = _synthesis_axis(hl, hh, h0y, h1y, offset_y, h, -2)
+                result.add_(_synthesis_axis(low_x, high_x, h0x, h1x, offset_x, w, -1))
         return result / 4.0
+
+
+def quaternion_modulus(coefficients: torch.Tensor) -> torch.Tensor:
+    """Quaternion modulus per colour and band: ``sqrt(sum of the four components)``.
+
+    Input ``[B,48,H,W]`` packed as ``[colour, band, component]``; output
+    ``[B,3,4,H,W]``. For a genuine Hilbert pair this is the nearly shift-invariant
+    edge strength, which is what makes it usable as a restoration target.
+    """
+    b, channels, h, w = coefficients.shape
+    if channels % 16:
+        raise ValueError(f"Expected 16 bands*components per colour, got {channels}")
+    packed = coefficients.reshape(b, channels // 16, 4, 4, h, w)
+    return packed.square().sum(dim=3).sqrt()
+
+
+def quaternion_phases(coefficients: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """The two shift-encoding phases ``(phi_x, phi_y)`` per colour and band.
+
+    ``phi_x`` comes from the (real, i) pair and advances with horizontal
+    displacement; ``phi_y`` from (real, j) and advances with vertical
+    displacement. Output ``[B,3,4,2,H,W]``.
+    """
+    b, channels, h, w = coefficients.shape
+    if channels % 16:
+        raise ValueError(f"Expected 16 bands*components per colour, got {channels}")
+    packed = coefficients.reshape(b, channels // 16, 4, 4, h, w)
+    real = packed[:, :, :, 0]
+    phi_x = torch.atan2(packed[:, :, :, 1], real + eps)
+    phi_y = torch.atan2(packed[:, :, :, 2], real + eps)
+    return torch.stack((phi_x, phi_y), dim=3)
