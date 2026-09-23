@@ -48,6 +48,7 @@ from imu_blur_preview import (
     _style,
     find_trajectories,
     load_rgb,
+    resolve_data_root,
     load_trajectory,
     pick_window,
 )
@@ -158,10 +159,15 @@ def build_figure(sample, destination: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", required=True, type=Path)
+    parser.add_argument("--data-root", type=Path, default=None,
+                        help="mặc định: tự dò trong ~/Datasets và /kaggle/input")
     parser.add_argument("--config", type=Path,
                         default=Path(__file__).resolve().parent.parent / "configs/pipeline_v3.yaml")
-    parser.add_argument("--out", type=Path, default=Path("outputs/corruption_stages"))
+    # Relative to the repository, not the shell's working directory: run from an
+    # editor or another folder and a relative default silently scatters output
+    # wherever that happened to be.
+    parser.add_argument("--out", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "outputs/corruption_stages")
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--seed", type=int, default=None,
                         help="mặc định: ngẫu nhiên mỗi lần chạy; đặt để lặp lại đúng mẫu cũ")
@@ -191,10 +197,8 @@ def main() -> int:
         ImuCorruptionConfig(**raw["corruption"]["imu"]), master_seed=raw["data"]["corruption_seed"]
     )
 
+    args.data_root = resolve_data_root(args.data_root)
     trajectories = find_trajectories(args.data_root)
-    if not trajectories:
-        print(f"Không tìm thấy trajectory nào dưới {args.data_root}", file=sys.stderr)
-        return 2
 
     args.out.mkdir(parents=True, exist_ok=True)
     rng = generator(seed, "corruption_stages")

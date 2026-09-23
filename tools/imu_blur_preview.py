@@ -80,7 +80,7 @@ def _array(directory: Path, name: str) -> np.ndarray:
     raise FileNotFoundError(f"Missing {name}.npy/.txt in {directory}")
 
 
-def find_trajectories(root: Path) -> list[Path]:
+def find_trajectories(root: Path, limit: int | None = None) -> list[Path]:
     """Any directory holding both imu/ and image_lcam_front/, at any depth.
 
     Deliberately layout agnostic: this dataset nests an extra train/valid/test
@@ -98,9 +98,58 @@ def find_trajectories(root: Path) -> list[Path]:
             if (current / "imu" / "gyro.npy").is_file() or (current / "imu" / "gyro.txt").is_file():
                 found.append(current)
                 children.clear()
+                if limit is not None and len(found) >= limit:
+                    return found
                 continue
         children.sort()
     return sorted(found)
+
+
+DATA_ROOT_ENV = "QJEPA_DATA_ROOT"
+
+
+def data_root_candidates() -> list[Path]:
+    """Where a TartanAir tree usually sits, most specific first."""
+    home = Path.home()
+    candidates = [
+        home / "Datasets/tartanair-v2-jepa",
+        home / "Datasets/tartanair-v2",
+        Path("/kaggle/input/tartanairkhoi/tartanair-v2"),
+    ]
+    for parent in (home / "Datasets", Path("/kaggle/input")):
+        if parent.is_dir():
+            candidates.extend(sorted(child for child in parent.iterdir() if child.is_dir()))
+    return candidates
+
+
+def resolve_data_root(explicit: Path | None) -> Path:
+    """Fall back to discovery so the tool is runnable with no arguments.
+
+    Running a file straight from an editor passes no arguments, and a required
+    flag turns that into an error message instead of a picture. The repository
+    cannot carry one machine's path as a default, so look for the tree instead.
+    """
+    if explicit is not None:
+        if not find_trajectories(explicit, limit=1):
+            raise SystemExit(f"Không thấy trajectory nào dưới {explicit}")
+        return explicit
+    from os import environ
+
+    if environ.get(DATA_ROOT_ENV):
+        root = Path(environ[DATA_ROOT_ENV])
+        if find_trajectories(root, limit=1):
+            print(f"Dataset từ ${DATA_ROOT_ENV}: {root}")
+            return root
+        raise SystemExit(f"${DATA_ROOT_ENV}={root} nhưng không có trajectory nào ở đó")
+    for candidate in data_root_candidates():
+        if candidate.is_dir() and find_trajectories(candidate, limit=1):
+            print(f"Tự dò ra dataset: {candidate}"
+                  f"   (đặt --data-root hoặc ${DATA_ROOT_ENV} để chỉ định khác)")
+            return candidate
+    raise SystemExit(
+        "Không tự dò được dataset. Truyền --data-root <đường dẫn>, "
+        f"hoặc đặt biến môi trường {DATA_ROOT_ENV}."
+    )
 
 
 def choose_frame(corruptor, imu, imu_time, cam_time, usable, name,
@@ -302,10 +351,15 @@ def build_figure(sample, destination: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", required=True, type=Path)
+    parser.add_argument("--data-root", type=Path, default=None,
+                        help="mặc định: tự dò trong ~/Datasets và /kaggle/input")
     parser.add_argument("--config", type=Path,
                         default=Path(__file__).resolve().parent.parent / "configs/pipeline_v3.yaml")
-    parser.add_argument("--out", type=Path, default=Path("outputs/imu_blur_preview"))
+    # Relative to the repository, not the shell's working directory: run from an
+    # editor or another folder and a relative default silently scatters output
+    # wherever that happened to be.
+    parser.add_argument("--out", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "outputs/imu_blur_preview")
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--imu-window", type=int, default=128)
@@ -341,10 +395,8 @@ def main() -> int:
         ImuCorruptionConfig(**raw["corruption"]["imu"]), master_seed=raw["data"]["corruption_seed"]
     )
 
+    args.data_root = resolve_data_root(args.data_root)
     trajectories = find_trajectories(args.data_root)
-    if not trajectories:
-        print(f"Không tìm thấy trajectory nào dưới {args.data_root}", file=sys.stderr)
-        return 2
     print(f"{len(trajectories)} trajectory dưới {args.data_root}")
 
     args.out.mkdir(parents=True, exist_ok=True)
