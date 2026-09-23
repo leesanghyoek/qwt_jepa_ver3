@@ -134,7 +134,7 @@ def test_corruptor_refuses_to_run_without_the_gyro() -> None:
 
 
 def test_corruption_is_deterministic_for_the_same_sample() -> None:
-    corruptor = LowLightImageCorruptor(LowLightImageCorruptionConfig())
+    corruptor = LowLightImageCorruptor(LowLightImageCorruptionConfig(motion_from_imu=True))
     rng = np.random.default_rng(3)
     image = rng.random((32, 32, 3)).astype(np.float32)
     gyro, times = constant_gyro(0.1, 0.4, 0.9)
@@ -149,9 +149,8 @@ def test_corruption_is_deterministic_for_the_same_sample() -> None:
 
 def test_blurred_image_tracks_rotation_rate() -> None:
     """End to end: the same frame, two rotation rates, measurably different sharpness."""
-    corruptor = LowLightImageCorruptor(
-        LowLightImageCorruptionConfig(defocus_probability=0.0, downsample_probability=0.0)
-    )
+    corruptor = LowLightImageCorruptor(LowLightImageCorruptionConfig(
+        motion_from_imu=True, defocus_probability=0.0, downsample_probability=0.0))
     rng = np.random.default_rng(11)
     image = rng.random((64, 64, 3)).astype(np.float32)
     times = constant_gyro(0, 0, 0)[1]

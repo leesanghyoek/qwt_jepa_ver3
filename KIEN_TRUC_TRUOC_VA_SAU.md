@@ -12,7 +12,7 @@ So sánh giữa `d06d214` (trước) và `fc9ebcf` (sau). Mọi con số trong t
 | **Biến đổi ảnh** | 4 cây db4 lệch 1 mẫu, 8 tap | Cặp Hilbert thiết kế riêng, 14 tap | Bản chất toán học |
 | Năng lượng tần số âm | **0,1814** | **0,0677** | tốt hơn **2,68×** |
 | Modulus ripple (dịch dưới pixel) | 0,1180 | 0,0957 | tốt hơn 19% |
-| **Blur ảnh** | Bốc ngẫu nhiên, độc lập IMU | Tích phân gyro sạch trên phơi sáng | Bản chất bài toán |
+| **Blur ảnh** | Bốc ngẫu nhiên, độc lập IMU | **giữ nguyên** — xem mục 2 | (cơ chế nối đã dựng, đang tắt) |
 | **Khối Jacobian** | 1 hướng Rademacher, phạt đẳng hướng | `log(g_nhiễu / g_tín hiệu)` | Bản chất mục tiêu |
 | Trọng số Jacobian | `1e-4` (trơ) | `0,05` (có tác dụng) | ×500 |
 | Số tham số backbone | 1.333.120 | 1.333.120 | **không đổi** |
@@ -25,7 +25,16 @@ là thay đổi về **tính đúng đắn**, không phải về dung lượng.
 
 ---
 
-## 2. Thay đổi cấu trúc lớn nhất: IMU giờ có việc để làm
+## 2. Blur từ IMU: đã dựng, đã kiểm chứng, nhưng ĐANG TẮT
+
+> **Cập nhật 23/09/2026.** Người dùng quyết định giữ giả định ảnh mờ do **camera**
+> và nhiễu IMU do **môi trường** — hai nguyên nhân độc lập. `motion_from_imu`
+> mặc định là `false`, nên phần dưới mô tả một **tuỳ chọn**, không phải mặc định.
+>
+> Đánh đổi: khi hai nhánh độc lập, cửa sổ IMU không mang bit nào về cách ảnh bị
+> làm mờ, nên nhánh IMU không đóng góp cho việc khôi phục *ảnh*; liên kết duy
+> nhất còn lại là vector tóm tắt 128 chiều toàn cục trong fusion. Bật lại bằng
+> một dòng config; cơ chế đã có test và tool kiểm chứng.
 
 ### Trước
 
@@ -268,6 +277,8 @@ Quan trọng không kém, để biết cái gì còn nguyên là giới hạn:
 | Loss phase 2 (L1 + detail + energy + variation) | y nguyên |
 | Decoder neo phase 1, teacher EMA, VICReg | y nguyên |
 | Haar 1-D cho IMU | y nguyên |
+
+Blur ảnh cũng **không đổi**: vẫn bốc ngẫu nhiên, độc lập với IMU (mục 2).
 
 **Vì vậy đừng kỳ vọng SSIM nhảy vọt.** Trần SSIM 0,67 của run trước đến từ hai
 thứ chưa đụng tới: loss phase 2 toàn là trung vị (mọi số hạng per-coefficient đều

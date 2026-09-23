@@ -40,7 +40,7 @@ Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳ
 | | Trước | Sau | Đo bằng |
 |---|---|---|---|
 | **QWT** | 4 cây db4 lệch 1 mẫu. Không phải cặp Hilbert; năng lượng tần số âm **0,1814** | Cặp Hilbert thiết kế riêng, 14 tap, **0,0677** (tốt hơn 2,68×) | `tests/test_qwt_analyticity.py` |
-| **Blur ảnh** | `motion_length`/`motion_angle` bốc ngẫu nhiên, **độc lập với IMU** | Tích phân gyro sạch trên thời gian phơi sáng | `tests/test_imu_motion_blur.py` |
+| **Blur ảnh** | bốc ngẫu nhiên, độc lập với IMU | **giữ nguyên** (quyết định 23/09), nhưng đường nối IMU đã dựng xong và bật được bằng `motion_from_imu: true` | `tests/test_imu_motion_blur.py` |
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
 
 **Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
@@ -63,8 +63,8 @@ python3 -m pytest tests/ -q
 
 **Ablation có sẵn, không cần sửa code:** đặt `model.image_transform:
 qwt_dualtree_db4` để quay về transform cũ, và `corruption.image.motion_from_imu:
-false` để quay về blur ngẫu nhiên. Hai công tắc đó chính là nhánh control cho
-bảng so sánh trong báo cáo.
+true` để nối blur với IMU. Mặc định hiện tại là transform Hilbert + blur độc lập
+với IMU.
 
 ## Luồng tổng quát
 
@@ -478,10 +478,12 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
   Khởi tạo sao cho đóng góp skip ban đầu bằng 0, nên sàn identity không bị phá. Upsample bằng sub-pixel conv (pixel
   shuffle) thay cho nội suy bilinear, vì bilinear là bộ lọc thông thấp nên không
   sinh được tần số cao. Ở chế độ residual, head zero-init và cộng vào hệ số input.
-- `qjepa/corruptions/motion.py`: **blur chuyển động tích phân từ chính gyro sạch**
-  mà model nhận bản nhiễu của nó. Trước đây `motion_length`/`motion_angle` bốc
-  ngẫu nhiên, nên cửa sổ IMU không mang **một bit nào** về cách ảnh bị làm mờ —
-  có thể xoá hẳn nhánh IMU mà metric ảnh gần như không đổi. Hình học được **đo**
+- `qjepa/corruptions/motion.py`: blur chuyển động tích phân từ gyro sạch. **Tắt
+  mặc định** (`motion_from_imu: false`): dự án này coi ảnh mờ là do **camera** và
+  nhiễu IMU là do **môi trường**, hai nguyên nhân độc lập. Đánh đổi phải ghi rõ —
+  khi độc lập, cửa sổ IMU không mang **một bit nào** về cách ảnh bị làm mờ, nên
+  nhánh IMU không đóng góp được gì cho việc khôi phục *ảnh*; nó vẫn học khôi phục
+  chính nó. Bật `motion_from_imu: true` để nối lại. Hình học được **đo**
   chứ không giả định (`tools/imu_blur_axis_check.py`): hệ `lcam_front` trùng hệ
   body của IMU, tương quan ≥ 0,9998 và slope 1,00 trên 12 trajectory. Do đó
   `gyro_z` (yaw) → dịch ngang, `gyro_y` (pitch) → dịch dọc, `gyro_x` (roll) là

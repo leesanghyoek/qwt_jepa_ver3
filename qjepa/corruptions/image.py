@@ -36,9 +36,11 @@ class LowLightImageCorruptionConfig:
     motion_probability: float = 0.55
     motion_length_px: tuple[int, int] = (3, 9)
     # Motion blur integrated from the IMU the model also sees; see motion.py.
-    # `motion_probability`/`motion_length_px`/`motion_angle` above only apply when
-    # this is off, and that mode exists to ablate the coupling, not to run blind.
-    motion_from_imu: bool = True
+    # Off by default, matching configs/pipeline_v3.yaml: this project treats image
+    # blur as the camera's doing and IMU noise as the environment's, two unrelated
+    # causes. Turn it on to couple them, and `motion_probability`/
+    # `motion_length_px`/`motion_angle` stop applying.
+    motion_from_imu: bool = False
     exposure_seconds: tuple[float, float] = (0.008, 0.030)
     # A darker frame means the shutter stayed open longer, so low light and heavy
     # blur arrive together instead of being drawn independently.

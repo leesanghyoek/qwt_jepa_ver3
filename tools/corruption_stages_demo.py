@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # matplotlib.use() only takes effect before pyplot is loaded.
 from imu_blur_preview import (
     AXIS_COLORS,
+    image_corruptor_kernel,
     CAN_SHOW,
     GRID,
     INK,
@@ -45,6 +46,7 @@ from imu_blur_preview import (
     INK_SOFT,
     SURFACE,
     _style,
+    draw_kernel,
     find_trajectories,
     load_rgb,
     resolve_data_root,
@@ -108,10 +110,17 @@ def build_figure(sample, destination: Path) -> None:
     report = sample["report"]
     draw_stage(figure.add_subplot(grid[0, 0]), sample["clean"], "①", "ẢNH SẠCH",
                f"nét: {sample['sharp_clean']:.4f}\ntham chiếu, chỉ tồn tại lúc train")
+    if sample["from_imu"]:
+        stage2_title = "+ MỜ DO IMU"
+        stage2_detail = (f"quét {report['path_span_px']:.2f} px · phơi sáng "
+                         f"{report['exposure_seconds'] * 1000:.1f} ms")
+    else:
+        stage2_title = "+ MỜ CHUYỂN ĐỘNG (camera)"
+        stage2_detail = (f"dài {report.get('motion_length', 0)} px · góc "
+                         f"{np.degrees(report.get('motion_angle', 0.0)):.0f}° · bốc ngẫu nhiên")
     draw_stage(
-        figure.add_subplot(grid[0, 1]), sample["blurred"], "②", "+ MỜ DO IMU",
-        f"quét {report['path_span_px']:.2f} px · phơi sáng "
-        f"{report['exposure_seconds'] * 1000:.1f} ms\n"
+        figure.add_subplot(grid[0, 1]), sample["blurred"], "②", stage2_title,
+        f"{stage2_detail}\n"
         f"nét: {sample['sharp_blur']:.4f}  ({sample['drop_blur']:+.1f}%)  ·  "
         f"PSNR {sample['psnr_blur']:.2f} dB",
     )
@@ -131,7 +140,8 @@ def build_figure(sample, destination: Path) -> None:
 
     axis_clean = figure.add_subplot(grid[1, 0])
     draw_trace(axis_clean, time, gyro_clean, ("gx", "gy", "gz"), capture=capture,
-               title="① IMU SẠCH — vận tốc góc (thứ sinh ra vệt mờ ở ②)",
+               title=("① IMU SẠCH — vận tốc góc (thứ sinh ra vệt mờ ở ②)"
+                      if sample["from_imu"] else "① IMU SẠCH — vận tốc góc"),
                ylabel="rad/s", limits=limits)
     axis_clean.legend(loc="upper left", fontsize=8, frameon=False,
                       labelcolor=INK_SOFT, ncol=3, columnspacing=1.1)
@@ -140,22 +150,15 @@ def build_figure(sample, destination: Path) -> None:
                title="③ IMU + NHIỄU — đây mới là thứ model đọc",
                ylabel="rad/s", limits=limits)
 
-    axis_kernel = figure.add_subplot(grid[1, 2])
-    _style(axis_kernel)
-    axis_kernel.grid(False)
-    axis_kernel.imshow(sample["kernel"], cmap="Blues", interpolation="nearest")
-    axis_kernel.set_xticks([]); axis_kernel.set_yticks([])
-    axis_kernel.set_title("② Kernel mờ — tích phân gyro SẠCH",
-                          color=INK, fontsize=10, loc="left", pad=6)
-    axis_kernel.set_xlabel(
-        f"roll {np.degrees(report['roll_radians']):+.2f}° (không nằm trong kernel)\n"
-        "blur do gyro SẠCH; model chỉ được thấy bản nhiễu ở ③",
-        color=INK_SOFT, fontsize=8, linespacing=1.5)
+    draw_kernel(figure.add_subplot(grid[1, 2]), sample["kernel"], report)
 
+    story = ("ảnh sạch → + mờ do IMU → + nhiễu        (IMU: sạch → + nhiễu)"
+             if sample["from_imu"] else
+             "ảnh sạch → + mờ do CAMERA → + nhiễu        (IMU: sạch → + nhiễu do MÔI TRƯỜNG)\n"
+             "hai nguyên nhân độc lập — gyro bên dưới KHÔNG giải thích vệt mờ ở ②")
     figure.suptitle(
-        f"{sample['name']}  ·  frame {sample['frame']}  ·  seed {sample['seed']}\n"
-        "ảnh sạch  →  + mờ do IMU  →  + nhiễu        (IMU: sạch  →  + nhiễu)",
-        color=INK, fontsize=12.5, x=0.045, ha="left", y=0.975)
+        f"{sample['name']}  ·  frame {sample['frame']}  ·  seed {sample['seed']}\n{story}",
+        color=INK, fontsize=12.5, x=0.045, ha="left", y=0.978)
     figure.savefig(destination, dpi=125, facecolor=SURFACE)
     return figure
 
@@ -225,12 +228,17 @@ def main() -> int:
             frame = int(rng.integers(1, max(2, usable - 1)))
             start, end = pick_window(imu_time, float(cam_time[frame]), args.imu_window)
             parameters = motion_only._parameters("demo", 0, name, float(cam_time[frame]), "blur_only")
-            u, v, _ = exposure_path(
-                imu[start:end, 3:6], imu_time[start:end], float(cam_time[frame]),
-                float(parameters["exposure_seconds"]),
-                focal_length_px=base.focal_length_px, angular_gain=base.angular_gain,
-                samples=base.motion_path_samples)
-            span = float(np.hypot(u.max() - u.min(), v.max() - v.min()))
+            if base.motion_from_imu:
+                u, v, _ = exposure_path(
+                    imu[start:end, 3:6], imu_time[start:end], float(cam_time[frame]),
+                    float(parameters["exposure_seconds"]),
+                    focal_length_px=base.focal_length_px, angular_gain=base.angular_gain,
+                    samples=base.motion_path_samples)
+                span = float(np.hypot(u.max() - u.min(), v.max() - v.min()))
+            else:
+                # Blur is an independent draw, so the gyro says nothing about how
+                # blurred this frame will be; the drawn length is what decides.
+                span = float(parameters["motion_length"]) if parameters["motion"] else 0.0
             if best is None or span > best[1]:
                 best = (frame, span, start, end)
             if span >= args.min_span_px:
@@ -247,12 +255,8 @@ def main() -> int:
         imu_noisy, _ = imu_corruptor.window(imu, imu_time, start, end, split="demo",
                                             realization=0, trajectory=name, mode="full")
 
-        from qjepa.corruptions.motion import imu_blur_kernel
-        kernel, _ = imu_blur_kernel(
-            window[:, 3:6], window_time, float(cam_time[frame]),
-            float(report["exposure_seconds"]), focal_length_px=base.focal_length_px,
-            angular_gain=base.angular_gain, samples=base.motion_path_samples,
-            max_radius_px=base.motion_max_radius_px)
+        kernel = image_corruptor_kernel(motion_only, report, window, window_time,
+                                        float(cam_time[frame]))
 
         sharp_clean = sharpness(clean)
         sharp_blur, sharp_noisy = sharpness(blurred), sharpness(noisy)
@@ -267,11 +271,17 @@ def main() -> int:
             "drop_blur": 100.0 * (sharp_blur / sharp_clean - 1.0),
             "drop_noisy": 100.0 * (sharp_noisy / sharp_clean - 1.0),
             "psnr_blur": psnr(clean, blurred), "psnr_noisy": psnr(clean, noisy),
+            "from_imu": base.motion_from_imu,
         }, destination))
 
         print(f"{name} · frame {frame}")
-        print(f"   ② mờ do IMU : quét {span:5.2f} px · phơi sáng "
-              f"{report['exposure_seconds'] * 1000:4.1f} ms · "
+        if base.motion_from_imu:
+            origin = (f"② mờ do IMU : quét {span:5.2f} px · phơi sáng "
+                      f"{report['exposure_seconds'] * 1000:4.1f} ms")
+        else:
+            origin = (f"② mờ camera : dài {report.get('motion_length', 0):2d} px · góc "
+                      f"{np.degrees(report.get('motion_angle', 0.0)):3.0f}° (ngẫu nhiên)")
+        print(f"   {origin} · "
               f"nét {100.0 * (sharp_blur / sharp_clean - 1.0):+6.1f}% · "
               f"PSNR {psnr(clean, blurred):5.2f} dB")
         print(f"   ③ + nhiễu   : thiếu sáng x{report['exposure_gain']:.2f} · "

@@ -55,18 +55,26 @@ corruption:
     vignette_strength: [0.0, 0.45]
     defocus_probability: 0.68
     defocus_sigma_px: [0.30, 1.45]
-    # Blur duoc TICH PHAN tu chinh gyro sach ma model nhan ban nhieu cua no.
-    # Truoc day motion_length/motion_angle boc ngau nhien, nen cua so IMU khong
-    # mang mot bit thong tin nao ve cach anh bi lam mo — nhanh IMU co the bi xoa
-    # khoi model ma metric anh gan nhu khong doi. Dat false de chay ablation.
-    motion_from_imu: true
+    # QUYET DINH CUA NGUOI DUNG (23/09/2026): coi anh mo la do CAMERA va nhieu IMU
+    # la do MOI TRUONG — hai nguyen nhan doc lap. Vi vay blur quay ve boc ngau
+    # nhien bang motion_probability/motion_length_px/motion_angle ben duoi.
+    #
+    # Danh doi phai ghi ro: khi hai nhanh doc lap, cua so IMU khong mang mot bit
+    # nao ve cach anh bi lam mo, nen nhanh IMU khong dong gop duoc gi cho viec
+    # khoi phuc ANH; lien ket duy nhat con lai la vector tom tat 128 chieu toan
+    # cuc trong fusion. Nhanh IMU van hoc khoi phuc chinh no.
+    #
+    # Dat true de noi lai hai nhanh: blur khi do la gyro SACH tich phan tren thoi
+    # gian phoi sang (qjepa/corruptions/motion.py), da co test va tool kiem chung.
+    motion_from_imu: false
+    # Chi co tac dung khi motion_from_imu: true (no quyet dinh do dai kernel).
     exposure_seconds: [0.008, 0.030]
     exposure_tracks_darkness: true
     focal_length_px: 128.0     # 640 px @ 90 deg FOV -> f=320, resize 256 -> f=128
     angular_gain: 1.0          # chinh do nang cua blur ma KHONG pha tuong quan IMU
     motion_path_samples: 25
     motion_max_radius_px: 16.0
-    # Chi dung khi motion_from_imu: false.
+    # Duong blur dang hoat dong (motion_from_imu: false).
     motion_probability: 0.55
     motion_length_px: [3, 9]
     downsample_probability: 0.32
