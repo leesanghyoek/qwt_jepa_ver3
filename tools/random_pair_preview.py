@@ -43,7 +43,8 @@ def choose_indices(
 
 
 def _eligible_indices(dataset, image_mode: str) -> list[int]:
-    if image_mode != "blur_only":
+    """Frames where some optical degradation actually fired, so a panel shows one."""
+    if image_mode not in ("blur_only", "blur_low_light"):
         return list(range(len(dataset)))
     eligible = []
     for index, sample in enumerate(dataset.samples):
@@ -107,7 +108,7 @@ def preview(
     checkpoint: str | Path, manifest_path: str | Path, *, output: str | Path,
     state: str | Path, count: int = 4, split: str = "valid",
     image_mode: str = "blur_only", imu_mode: str = "full",
-    device: str = "cuda", seed: int | None = None,
+    device: str = "cuda", seed: int | None = None, light_scale: float = 1.0,
 ) -> dict:
     if count < 1:
         raise ValueError("count must be positive")
@@ -117,6 +118,20 @@ def preview(
     state = Path(state)
     manifest = read_manifest(manifest_path)
     system, config = _system_from_phase2(str(checkpoint), torch.device(device))
+    if light_scale != 1.0:
+        # Brightening only the preview, never the checkpoint's own recipe: the
+        # panels are for looking at, and metrics stay comparable only while the
+        # corruption matches what the run was measured on.
+        if light_scale <= 0:
+            raise ValueError("light_scale must be positive")
+        low, high = config["corruption"]["image"]["exposure_gain"]
+        config["corruption"]["image"]["exposure_gain"] = [
+            min(1.0, low * light_scale), min(1.0, high * light_scale)
+        ]
+        print(f"[preview] exposure_gain {low:.3f}..{high:.3f} -> "
+              f"{config['corruption']['image']['exposure_gain'][0]:.3f}.."
+              f"{config['corruption']['image']['exposure_gain'][1]:.3f} "
+              f"(chỉ ảnh hưởng panel này, không đổi checkpoint)")
     previous = json.loads(state.read_text()) if state.is_file() else {}
     identity = (manifest["meta"]["manifest_hash"], split, image_mode, imu_mode)
     previous_ids = set(previous.get("sample_ids", [])) if tuple(previous.get("identity", ())) == identity else set()
@@ -167,6 +182,7 @@ def preview(
     report = {
         "checkpoint": str(checkpoint), "manifest_hash": identity[0],
         "split": split, "image_mode": image_mode, "imu_mode": imu_mode,
+        "light_scale": light_scale,
         "seed": seed, "realization": realization, "items": items,
     }
     (output / "preview.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -186,14 +202,19 @@ def main() -> None:
     parser.add_argument("--state", required=True)
     parser.add_argument("--count", type=int, default=4)
     parser.add_argument("--split", choices=("valid", "test"), default="valid")
-    parser.add_argument("--image-mode", choices=("full", "blur_only"), default="blur_only")
+    parser.add_argument("--image-mode",
+                        choices=("full", "blur_only", "blur_low_light"),
+                        default="blur_only")
+    parser.add_argument("--light-scale", type=float, default=1.0,
+                        help="nhân vào exposure_gain: >1 sáng hơn, 1.0 giữ nguyên recipe train")
     parser.add_argument("--imu-mode", choices=("full", "clean"), default="full")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
     args = parser.parse_args()
     preview(args.checkpoint, args.manifest, output=args.output, state=args.state,
             count=args.count, split=args.split, image_mode=args.image_mode,
-            imu_mode=args.imu_mode, device=args.device, seed=args.seed)
+            imu_mode=args.imu_mode, device=args.device, seed=args.seed,
+            light_scale=args.light_scale)
 
 
 if __name__ == "__main__":

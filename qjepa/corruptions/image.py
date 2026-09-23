@@ -19,7 +19,12 @@ from scipy import ndimage
 from .motion import imu_blur_kernel
 from .rng import generator
 
-IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_only")
+# "blur_low_light" is optics plus exposure and nothing else. "blur_only" leaves
+# the frame at full brightness and "full" buries the blur under sensor grain, so
+# neither shows what blur looks like on a dark frame -- which is the case this
+# project is actually built for.
+IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_only",
+               "blur_low_light")
 
 
 @dataclass(frozen=True)
@@ -144,7 +149,15 @@ class LowLightImageCorruptor:
         segment = math.floor(timestamp / self.config.segment_seconds)
         rng = generator(self.master_seed, "image_parameters", split, realization, trajectory, segment)
         cfg = self.config
-        clean = mode == "clean" or (mode == "full" and rng.random() < cfg.clean_probability)
+        # Draw unconditionally. Written as `mode == "full" and rng.random() < p`
+        # the call short-circuits away for every other mode, which shifts the
+        # whole parameter stream by one and leaves each named scenario looking at
+        # a different camera than "full" did on the same frame -- measured as
+        # exposure_gain 0.62 vs 0.27. Isolating one degradation only means
+        # something while the other parameters stay put.
+        # "full" is unaffected by this change, so training data is bit-identical.
+        clean_draw = rng.random()
+        clean = mode == "clean" or (mode == "full" and clean_draw < cfg.clean_probability)
         exposure_gain = float(rng.uniform(*cfg.exposure_gain))
         exposure_seconds = float(rng.uniform(*cfg.exposure_seconds))
         if cfg.exposure_tracks_darkness:
@@ -210,8 +223,8 @@ class LowLightImageCorruptor:
         if params["clean"]:
             return image_clean.astype(np.float32, copy=True), params
 
-        optical = mode in ("full", "blur_only")
-        low_light = mode in ("full", "low_light_only")
+        optical = mode in ("full", "blur_only", "blur_low_light")
+        low_light = mode in ("full", "low_light_only", "blur_low_light")
         sensor_noise = mode in ("full", "sensor_noise_only")
         image = image_clean.astype(np.float64, copy=True)
 

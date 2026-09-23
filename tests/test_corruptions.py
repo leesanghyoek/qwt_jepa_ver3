@@ -46,8 +46,16 @@ def test_low_light_corruption_is_deterministic_and_actually_darkens():
 
 
 def test_named_image_corruption_groups_are_isolated():
+    """Each named mode applies its own stage and leaves the others alone.
+
+    Probabilities are forced so the optical stage definitely fires: with the
+    shipped 0.68/0.55/0.32 a given frame can legitimately draw no blur at all,
+    and a test that only passes on a lucky draw is not testing the contract.
+    """
     corruptor = LowLightImageCorruptor(
-        LowLightImageCorruptionConfig(clean_probability=0.0), master_seed=3
+        LowLightImageCorruptionConfig(clean_probability=0.0, defocus_probability=1.0,
+                                      defocus_sigma_px=(1.4, 1.45)),
+        master_seed=3,
     )
     image = np.random.default_rng(1).random((24, 24, 3), dtype=np.float32)
     gyro, times = gyro_window()
@@ -56,9 +64,36 @@ def test_named_image_corruption_groups_are_isolated():
     clean, _ = corruptor(image, mode="clean", **common)
     dark, _ = corruptor(image, mode="low_light_only", **common)
     blur, _ = corruptor(image, mode="blur_only", **common)
+    both, _ = corruptor(image, mode="blur_low_light", **common)
+
     assert np.array_equal(clean, image)
     assert dark.mean() < image.mean()
     assert not np.array_equal(blur, image)
+    # Blur alone must not change exposure, and low light alone must not blur.
+    assert blur.mean() == pytest.approx(image.mean(), abs=0.02)
+    assert both.mean() < image.mean()
+    sharpness = lambda x: np.abs(np.diff(x.mean(axis=-1), axis=1)).mean()
+    assert sharpness(blur) < sharpness(image)
+    assert sharpness(both) < sharpness(dark)
+
+
+def test_every_mode_sees_the_same_camera_on_the_same_frame():
+    """Isolating one stage only means something if the rest stay put.
+
+    Guards a fixed bug: `mode == "full" and rng.random() < p` short-circuited the
+    draw away for every other mode, so each named scenario silently ran against a
+    different exposure than `full` did on that frame (measured 0.62 vs 0.27).
+    """
+    corruptor = LowLightImageCorruptor(LowLightImageCorruptionConfig(), master_seed=11)
+    drawn = {
+        mode: corruptor._parameters("test", 0, "T", 0.4, mode)
+        for mode in ("full", "blur_only", "low_light_only", "sensor_noise_only",
+                     "blur_low_light")
+    }
+    for key in ("exposure_gain", "tone_gamma", "defocus_sigma", "motion_length",
+                "quantization_bits", "photon_count"):
+        values = {mode: parameters[key] for mode, parameters in drawn.items()}
+        assert len(set(values.values())) == 1, f"{key} khác nhau giữa các mode: {values}"
 
 
 def test_imu_overlaps_share_the_exact_same_corruption_trace():
