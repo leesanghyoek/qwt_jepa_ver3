@@ -39,7 +39,7 @@ experiment_name: qwt_jepa_sharp_smooth_kaggle
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version4/outputs/p3_sharp_smooth
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p5_modulus
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   validation_batches: 32
@@ -71,3 +71,6 @@ phase2:
   # Doi so 2: so hang duy nhat phat duoc do rung giua cac mau lien ke.
   imu_variation_weight: 2.0
   detail_energy_weight: 1.0
+  # Doi so 3 (p5): so hang chi tiet anh do tren modulus |q| thay vi tung he so.
+  # Chi doi phase 2, nen checkpoint phase 1 cua p4 dung lai duoc nguyen ven.
+  image_detail_loss: modulus

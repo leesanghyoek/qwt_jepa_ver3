@@ -84,6 +84,43 @@ def detail_band_l1(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> t
     return F.l1_loss(detail_bands(predicted, dim), detail_bands(target, dim))
 
 
+IMAGE_DETAIL_LOSSES = ("coefficient", "modulus")
+
+
+def detail_modulus(coefficients: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Quaternion modulus of the image detail bands, ``[B, colour, band, H, W]``.
+
+    ``|q| = sqrt(real^2 + i^2 + j^2 + k^2)`` over the four dual-tree components. For
+    a genuine Hilbert pair this is the local edge strength and it barely moves when
+    the edge moves by a fraction of a pixel -- the property the per-coefficient
+    loss lacks. ``eps`` keeps the gradient finite in flat regions, where |q| -> 0.
+    """
+    batch, channels, height, width = coefficients.shape
+    if channels % 16:
+        raise ValueError(f"Expected 16 bands*components per colour, got {channels}")
+    packed = coefficients.reshape(batch, channels // 16, 4, 4, height, width)[:, :, 1:]
+    return (packed.square().sum(dim=3) + eps).sqrt()
+
+
+def detail_modulus_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """L1 between detail-band quaternion moduli -- the image detail term that does
+    not reward blur.
+
+    Where an edge's exact position is uncertain, the clean detail COEFFICIENT
+    could be positive, negative or anything between, so an L1 on coefficients is
+    minimised by shrinking toward zero: measured on real frames with edges
+    uncertain by +-0.75 px, it prefers detail at 0.5x true strength, and at 0.25x
+    on the actual corrupted input. The modulus of that same edge is nearly the
+    same wherever it sits, so its conditional median is the true edge strength:
+    1.0x and 1.25x on the same two measurements. Blurring stops being the safe
+    answer. Phase is left unconstrained here on purpose; the pixel L1 and the
+    residual on the input coefficients already pin polarity and placement.
+    """
+    if predicted.shape != target.shape:
+        raise ValueError(f"Coefficients {tuple(predicted.shape)} != {tuple(target.shape)}")
+    return F.l1_loss(detail_modulus(predicted), detail_modulus(target))
+
+
 def detail_energy_gap(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> torch.Tensor:
     """Lech nang luong duong net, tinh theo tung bang.
 
@@ -137,7 +174,10 @@ def phase2_reconstruction_loss(
     detail_weight: float = 0.0,
     variation_weight: float = 0.0,
     detail_energy_weight: float = 0.0,
+    image_detail_loss: str = "coefficient",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if image_detail_loss not in IMAGE_DETAIL_LOSSES:
+        raise ValueError(f"image_detail_loss must be one of {IMAGE_DETAIL_LOSSES}")
     image = F.l1_loss(image_restored, image_clean)
     accel = F.smooth_l1_loss(
         imu_restored_normalized[:, :3], imu_clean_normalized[:, :3], beta=beta
@@ -150,10 +190,19 @@ def phase2_reconstruction_loss(
     if detail_weight > 0 and image_coefficients is not None:
         # L1 tren pixel toi uu ve trung vi co dieu kien, ma nghiem do chinh la
         # anh mo. So hang nay phat rieng phan duong net bi mat.
-        image_detail = detail_band_l1(image_coefficients, image_coefficient_target, dim=2)
         imu_detail = detail_band_l1(imu_coefficients, imu_coefficient_target, dim=1)
+        if image_detail_loss == "modulus":
+            image_detail = detail_modulus_l1(image_coefficients, image_coefficient_target)
+            parts["image_detail_modulus_l1"] = image_detail
+            # The coefficient L1 is still logged, outside the graph, so runs with
+            # either term stay comparable on the number every earlier run reports.
+            with torch.no_grad():
+                parts["image_detail_l1"] = detail_band_l1(
+                    image_coefficients, image_coefficient_target, dim=2)
+        else:
+            image_detail = detail_band_l1(image_coefficients, image_coefficient_target, dim=2)
+            parts["image_detail_l1"] = image_detail
         total = total + detail_weight * (image_detail + 0.5 * imu_detail)
-        parts["image_detail_l1"] = image_detail
         parts["imu_detail_l1"] = imu_detail
     if detail_energy_weight > 0 and image_coefficients is not None:
         image_energy = detail_energy_gap(image_coefficients, image_coefficient_target, dim=2)

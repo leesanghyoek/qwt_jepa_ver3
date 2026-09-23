@@ -235,4 +235,12 @@ phase2:
   # duong net phai bang anh sach, nen co nho vi pham truc tiep. Khop mo-men, khong
   # phai doi khang: khong can mang thu hai, khong co rui ro mat can bang.
   detail_energy_weight: 1.0
+  # So hang chi tiet cua ANH do tren gi. "coefficient" = L1 tren tung he so, la
+  # thu da giu anh mo: do tren anh that voi canh lech +-0,75 px, no toi uu khi
+  # chi tiet chi con 0,5x do manh that, va 0,25x tren input nhieu that — tuc no
+  # THUONG viec xoa chi tiet. "modulus" = L1 tren modulus quaternion |q| cua QWT,
+  # gan nhu bat bien khi canh dich duoi 1 px, nen toi uu dung o 1,0x va 1,25x.
+  # IMU khong doi (Haar khong co quaternion). Trong so van la
+  # reconstruction_detail_weight. Config cu khong co khoa nay = coefficient.
+  image_detail_loss: modulus
   precision: fp32

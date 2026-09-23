@@ -42,6 +42,7 @@ Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳ
 | **QWT** | 4 cây db4 lệch 1 mẫu. Không phải cặp Hilbert; năng lượng tần số âm **0,1814** | Cặp Hilbert thiết kế riêng, 14 tap, **0,0677** (tốt hơn 2,68×) | `tests/test_qwt_analyticity.py` |
 | **Blur ảnh** | bốc ngẫu nhiên, độc lập với IMU | **giữ nguyên** (quyết định 23/09), nhưng đường nối IMU đã dựng xong và bật được bằng `motion_from_imu: true` | `tests/test_imu_motion_blur.py` |
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
+| **Loss chi tiết ảnh** | L1 trên từng hệ số — tối ưu khi chi tiết chỉ còn **0,25×** (tức thưởng cho ảnh mờ) | L1 trên **modulus quaternion** `\|q\|` — tối ưu ở **1,25×** | `tests/test_detail_modulus_loss.py` |
 
 **Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
 phân phối blur đã đổi, nên checkpoint phase 1 cũ không còn so sánh được. Đây là
@@ -65,6 +66,47 @@ python3 -m pytest tests/ -q
 qwt_dualtree_db4` để quay về transform cũ, và `corruption.image.motion_from_imu:
 true` để nối blur với IMU. Mặc định hiện tại là transform Hilbert + blur độc lập
 với IMU.
+
+## Vì sao ảnh vẫn mờ, và loss modulus
+
+Ba decoder rất khác nhau dừng ở cùng một sai số chi tiết (`detail_band_l1` ≈ 0,0144):
+decoder neo phase 1 chỉ đọc latent, decoder phase 2 không skip, và decoder phase 2
+có skip độ phân giải đầy đủ. Cho decoder thấy thêm ảnh đầu vào không kéo mức đó
+xuống, nên mức đó do **hàm loss** đặt, không phải do kiến trúc. Một ResNet chỉ là
+decoder thứ tư và sẽ dừng ở cùng chỗ.
+
+Cơ chế: khi vị trí cạnh không chắc (lệch dưới 1 px), hệ số chi tiết đổi dấu và độ lớn
+theo vị trí, nên L1 trên từng hệ số được tối thiểu hoá bằng cách **co về 0**. Đo trên
+ảnh TartanAir thật:
+
+| | L1 trên hệ số | L1 trên modulus `\|q\|` |
+|---|---|---|
+| cạnh lệch ±0,75 px, ứng viên = chi tiết sạch × s | tối ưu ở s = **0,5** | tối ưu ở s = **1,0** |
+| nhiễu thật (full), ứng viên = chi tiết input × s | tối ưu ở s = **0,25** | tối ưu ở s = **1,25** |
+
+Modulus quaternion gần như bất biến khi cạnh dịch dưới 1 px — chính tính chất cặp
+Hilbert được thiết kế để có — nên nó không phạt cạnh hơi lệch và nghiệm tối ưu là
+**đúng độ mạnh cạnh**. `phase2.image_detail_loss: modulus` thay số hạng chi tiết ẢNH
+bằng số hạng này (IMU không đổi, cùng trọng số `reconstruction_detail_weight`).
+`image_detail_l1` theo hệ số vẫn được ghi log để so với mọi run trước.
+
+Chỉ đổi phase 2, nên `configuration_hash` phase 1 không đổi và checkpoint phase 1 cũ
+dùng lại được (`REUSE_PHASE1_FROM` trong Cell 4 của notebook).
+
+A/B cục bộ trên CPU (cùng phase 1, 600 update phase 2 mỗi bên, chỉ khác số hạng này;
+48 frame validation, `tools/image_blur_audit.py`):
+
+| kịch bản | hệ số: PSNR · độ mạnh cạnh | modulus: PSNR · độ mạnh cạnh |
+|---|---|---|
+| full (đúng bài toán) | 16,25 · 0,0897 | **16,53 · 0,0933** |
+| chỉ thiếu sáng | 17,29 · 0,2137 | **17,69 · 0,2200** |
+| chỉ blur (ngoài phân phối train) | **20,70** · 0,1770 | 20,47 · **0,1828** |
+
+Modulus thắng cả bốn chỉ số (PSNR, MAE, độ mạnh cạnh, lỗi gradient cạnh) ở hai kịch
+bản đúng phân phối train. Hiệu ứng **có thật nhưng khiêm tốn** ở ngân sách này: độ mạnh
+cạnh tăng 3–4%, còn rất xa ảnh sạch (0,411). Đây là số của một phase 1 chỉ 40 update;
+kết luận cuối phải chờ run Kaggle đầy đủ. Nếu vẫn chưa đủ nét, đòn bẩy mạnh hơn là
+adversarial (commit `a24a038`), đổi lại PSNR giảm.
 
 ## Luồng tổng quát
 

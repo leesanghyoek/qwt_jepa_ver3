@@ -49,7 +49,8 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "variance", "covarianc
                 "reconstruction", "reconstruction_image", "reconstruction_image_detail",
                 "reconstruction_imu", "reconstruction_imu_detail",
                 "encoder_sensitivity", "gradient_norm")
-PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_energy",
+PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
+                "image_detail_energy",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -344,6 +345,7 @@ def config_section(run: Path) -> None:
         ("phase2.reconstruction_detail_weight", ("phase2", "reconstruction_detail_weight")),
         ("phase2.detail_energy_weight", ("phase2", "detail_energy_weight")),
         ("phase2.imu_variation_weight", ("phase2", "imu_variation_weight")),
+        ("phase2.image_detail_loss", ("phase2", "image_detail_loss")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
         ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]
