@@ -22,6 +22,7 @@ Repository này triển khai pipeline hai giai đoạn theo
 - [Các cell Kaggle, train, resume, đồ thị và kết quả](KAGGLE_TRAIN_CELLS.md).
 - [Sơ đồ kiến trúc chi tiết và quy trình train](KIEN_TRUC_VA_QUY_TRINH_TRAIN.md).
 - [Kết quả kiểm tra code và giới hạn còn lại](CODE_REVIEW_KAGGLE.md).
+- [**Kiến trúc: trước và sau**](KIEN_TRUC_TRUOC_VA_SAU.md) — so sánh từng thay đổi kèm phép đo.
 
 Backend ảnh mặc định là `qwt_dualtree_hilbert`: **cặp Hilbert thật**, thiết kế
 bằng liệt kê phân tích phổ (`tools/design_hilbert_pair.py`), 14 tap, đo được
@@ -69,23 +70,31 @@ bảng so sánh trong báo cáo.
 
 ```mermaid
 flowchart LR
-    G[Gyro sạch] -.-> |"tích phân trên thời gian phơi sáng<br/>= kernel blur"| N
-    N[Ảnh và IMU nhiễu] --> B[QWT/Haar + online encoders + fusion]
-    B --> Z[Dense latent ZI/ZU]
-    C[Ảnh và IMU sạch] --> T[EMA teacher encoders]
-    Z --> P[Latent predictors]
-    P --> L[JEPA + chống collapse + encoder sensitivity]
-    T --> L
-    Z --> A[Decoder neo, hệ số tuyệt đối, bị vứt sau phase 1]
-    C --> A
-    A --> L
-    Z2[ZI/ZU từ backbone đã đóng băng] --> D[Decoder phase 2 mới]
-    D --> DZ[Δ hệ số]
-    IN[Hệ số wavelet của chính input nhiễu] --> SUM[Cộng]
-    DZ --> SUM
-    SUM --> W[Inverse wavelet]
-    W --> R[Ảnh và IMU phục hồi]
+    CL["Ảnh + IMU<br/><b>SẠCH</b>"]
+    GY["gyro sạch"]
+    KER["tích phân trên<br/>phơi sáng<br/>⇒ <b>kernel blur</b>"]
+    NZ["Ảnh + IMU<br/><b>NHIỄU</b>"]
+    BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
+    Z["<b>②</b> ZI · ZU"]
+    L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
+    D["<b>③ Phase 2</b><br/>decoder mới<br/>+ hệ số input nhiễu"]
+    R["Ảnh + IMU<br/>phục hồi"]
+    CL --> GY --> KER --> NZ --> BB --> Z
+    CL --> NZ
+    Z --> L1
+    Z --> D --> R
+    CL -. "teacher EMA · đích của neo" .-> L1
+    classDef d fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
+    classDef l fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
+    class GY,KER d
+    class Z l
 ```
+
+Khối ① là thay đổi cấu trúc lớn nhất. Trước đây blur được **bốc ngẫu nhiên** độc
+lập với IMU, nên cửa sổ IMU không mang một bit nào về cách ảnh bị làm mờ — có thể
+xoá hẳn nhánh IMU mà metric ảnh gần như không đổi. Giờ blur là chuyển động thật
+tích phân trên thời gian phơi sáng, còn nhánh IMU chỉ nhận **bản nhiễu** của
+chính chuyển động đó. Khoảng cách giữa hai thứ là bài toán.
 
 Phase 1 **có** một decoder phụ làm *neo*: nó chấm điểm latent trên hệ số wavelet
 sạch với trọng số `0.45`, rồi bị vứt bỏ khi phase 1 kết thúc. Không có neo này
@@ -149,7 +158,10 @@ flowchart TB
     AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>cùng kiến trúc decoder phase 2<br/>bị vứt khi phase 1 kết thúc"]
     JE(["<b>JEPA loss</b> · trọng số 1,0<br/>online nhiễu ≈ teacher sạch"])
     VC(["<b>Variance 1,0 + Covariance 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch"])
-    JA(["<b>Encoder sensitivity</b> Jacobian<br/>log(gain nhiễu / gain tín hiệu)<br/>bật sau update 500 · ramp 1000"])
+    PN["probe <b>NHIỄU</b><br/>clean + ε·(noisy−clean)"]
+    PS["probe <b>TÍN HIỆU</b><br/>clean + ε·(clean−lowpass)"]
+    FC["<b>FI_clean · FU_clean</b><br/>điểm gốc — đã tính sẵn"]
+    JA(["<b>Jacobian tỉ số</b> · 0,05<br/>log(g_nhiễu / g_tín hiệu)<br/>chặn dưới · bật sau update 500"])
     ANL(["<b>Anchor loss · 0,45</b><br/>+ băng chi tiết 2,0"])
     CLEAN --> TE --> JE
     Z --> PR --> JE
@@ -157,17 +169,27 @@ flowchart TB
     CLEAN -. "hệ số wavelet SẠCH = đích" .-> ANL
     Z --> VC
     F --> VC
-    F -. "đo TRƯỚC fusion" .-> JA
+    CLEAN --> PN & PS
+    PN --> JA
+    PS --> JA
+    FC -. "đo TRƯỚC fusion" .-> JA
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
     classDef p1 fill:#fff8e1,stroke:#f9a825,color:#1a1a1a
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
-    class Z,F lat
-    class CLEAN,TE,PR,AN p1
+    class Z,F,FC lat
+    class CLEAN,TE,PR,AN,PN,PS p1
     class JE,VC,JA,ANL loss
 ```
 
-Mũi tên nét đứt từ `FI · FU` cho thấy khối Jacobian đo **trước** fusion
-(`target: online_dense_before_fusion`), không đo trên latent.
+Khối Jacobian đo **trước** fusion (`target: online_dense_before_fusion`), không
+đo trên latent, và đo quanh điểm gốc **sạch** — mà feature của nó (`FI_clean`)
+phase 1 đã tính sẵn cho variance/covariance, nên chi phí thêm là **hai** forward
+encoder chứ không phải ba.
+
+Hai probe thay vì một là cả điểm mấu chốt: bản cũ đo **một** hướng Rademacher rồi
+tối thiểu hoá gain đó, tức phạt co đẳng hướng — bảo encoder bớt nhạy với *mọi
+thứ*, kéo thẳng về collapse. Tỉ số hai gain thì **không thứ nguyên**: collapse
+đưa cả hai về 0 và tỉ số đứng yên, nên nó nâng trọng số lên được thật.
 
 #### 3. Phase 2 — khôi phục, backbone đóng băng
 
