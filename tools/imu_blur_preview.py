@@ -232,7 +232,7 @@ def draw_kernel(axis, kernel, report):
     axis.set_xlabel(caption, color=INK_SOFT, fontsize=8)
 
 
-def draw_path(axis, u, v, report):
+def draw_path(axis, u, v):
     _style(axis)
     axis.plot(u, v, color=AXIS_COLORS[0], linewidth=2.0, zorder=3,
               solid_capstyle="round")
@@ -287,7 +287,7 @@ def build_figure(sample, destination: Path) -> None:
     axis_clean.legend(loc="upper left", fontsize=8, frameon=False,
                       labelcolor=INK_SOFT, ncol=3, columnspacing=1.1)
 
-    draw_path(figure.add_subplot(grid[1, 2]), sample["u"], sample["v"], sample["report"])
+    draw_path(figure.add_subplot(grid[1, 2]), sample["u"], sample["v"])
 
     source = "gyro SẠCH tích phân trên thời gian phơi sáng" if sample["from_imu"] \
         else "BỐC NGẪU NHIÊN — không liên quan gì tới IMU (nhánh control)"
@@ -358,7 +358,7 @@ def main() -> int:
         imu, imu_time, cam_time, images = load_trajectory(path)
         name = "/".join(path.parts[-3:])
         usable = min(len(cam_time), len(images))
-        frame, span, available = choose_frame(
+        frame, _, available = choose_frame(
             image_corruptor, imu, imu_time, cam_time, usable, name,
             args.imu_window, args.min_span_px, rng,
         )
