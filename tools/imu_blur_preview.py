@@ -30,7 +30,34 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")
+
+def select_backend() -> bool:
+    """Pick an on-screen backend when one exists; return whether it can show.
+
+    Forcing Agg unconditionally means the figures only ever reach a file, which
+    is useless when the point is to look at them. Forcing a GUI backend instead
+    would break every headless run -- Kaggle, CI, a shell over ssh -- so the
+    choice is made from the environment, and Agg remains the fallback.
+    """
+    import matplotlib
+
+    if os.environ.get("MPLBACKEND"):
+        return matplotlib.get_backend().lower() not in {"agg", "pdf", "ps", "svg", "template"}
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        matplotlib.use("Agg")
+        return False
+    for candidate in ("QtAgg", "TkAgg", "GTK3Agg"):
+        try:
+            matplotlib.use(candidate)
+            return True
+        except Exception:
+            continue
+    matplotlib.use("Agg")
+    return False
+
+
+CAN_SHOW = select_backend()
+
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
@@ -346,7 +373,7 @@ def build_figure(sample, destination: Path) -> None:
         color=INK, fontsize=12.5, x=0.05, ha="left", y=0.975,
     )
     figure.savefig(destination, dpi=125, facecolor=SURFACE)
-    plt.close(figure)
+    return figure
 
 
 def main() -> int:
@@ -374,6 +401,8 @@ def main() -> int:
     parser.add_argument("--summary", type=int, default=0, metavar="N",
                         help="also plot gyro-predicted vs applied blur over N frames, "
                              "for both arms — one frame proves nothing, this does")
+    parser.add_argument("--no-show", action="store_true",
+                        help="chỉ ghi file, không mở cửa sổ")
     parser.add_argument("--keep-optical-blur", action="store_true",
                         help="also apply defocus and downsampling (hides what the IMU did)")
     args = parser.parse_args()
@@ -404,6 +433,7 @@ def main() -> int:
     chosen = rng.choice(len(trajectories), size=min(args.samples, len(trajectories)),
                         replace=len(trajectories) < args.samples)
 
+    figures = []
     print(f"\n{'frame':<34} {'quét px':>8} {'phơi sáng ms':>13} {'|ω| rad/s':>10} {'PSNR dB':>9}")
     for number, index in enumerate(chosen):
         path = trajectories[int(index)]
@@ -443,14 +473,14 @@ def main() -> int:
         peak = float(np.abs(window[:, 3:6]).max())
 
         destination = args.out / f"{number:02d}_{name.replace('/', '_')}_f{frame:06d}.png"
-        build_figure({
+        figures.append(build_figure({
             "name": name, "frame": frame,
             "image_clean": image_clean, "image_noisy": image_noisy,
             "imu_clean": window.astype(np.float64), "imu_noisy": imu_noisy.astype(np.float64),
             "time": window_time, "kernel": kernel, "report": report,
             "u": u, "v": v, "psnr": psnr, "from_imu": not args.random_blur,
             "channel": args.imu_channel, "capture_time": float(cam_time[frame]),
-        }, destination)
+        }, destination))
         print(f"{name + ' f' + str(frame):<34} {report.get('path_span_px', float('nan')):>8.2f} "
               f"{report['exposure_seconds'] * 1000:>13.1f} {peak:>10.2f} {psnr:>9.2f}"
               f"   ({available} / {usable} frame đạt ngưỡng)")
@@ -458,7 +488,19 @@ def main() -> int:
     if args.summary:
         summarise(args, image_config, raw, trajectories, rng)
     print(f"\nĐã lưu {len(chosen)} hình vào {args.out}")
+    show_or_close(figures, args.no_show)
     return 0
+
+
+def show_or_close(figures, suppressed: bool) -> None:
+    if suppressed or not CAN_SHOW:
+        if not suppressed and not CAN_SHOW:
+            print("Không có màn hình để hiển thị; chỉ ghi file.")
+        for figure in figures:
+            plt.close(figure)
+        return
+    print("Đang mở cửa sổ — đóng hết cửa sổ để kết thúc.")
+    plt.show()
 
 
 def _blur_extent(kernel: np.ndarray) -> float:
@@ -536,7 +578,6 @@ def summarise(args, image_config, raw, trajectories, rng) -> None:
     figure.tight_layout()
     destination = args.out / "summary_gyro_vs_blur.png"
     figure.savefig(destination, dpi=130, facecolor=SURFACE)
-    plt.close(figure)
     for label in arms:
         x, y = predicted[label], applied[label]
         print(f"  {label:<18} r = {np.corrcoef(x, y)[0, 1]:+.3f}  (n={len(x)})")

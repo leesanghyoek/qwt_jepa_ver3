@@ -28,18 +28,17 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Imported before pyplot on purpose: this module picks the backend, and
+# matplotlib.use() only takes effect before pyplot is loaded.
 from imu_blur_preview import (
     AXIS_COLORS,
+    CAN_SHOW,
     GRID,
     INK,
     INK_MUTED,
@@ -49,9 +48,13 @@ from imu_blur_preview import (
     find_trajectories,
     load_rgb,
     resolve_data_root,
+    show_or_close,
     load_trajectory,
     pick_window,
 )
+
+import matplotlib.pyplot as plt
+
 from qjepa.corruptions.image import LowLightImageCorruptionConfig, LowLightImageCorruptor
 from qjepa.corruptions.imu import ImuCorruptionConfig, TrajectoryImuCorruptor
 from qjepa.corruptions.motion import exposure_path
@@ -154,7 +157,7 @@ def build_figure(sample, destination: Path) -> None:
         "ảnh sạch  →  + mờ do IMU  →  + nhiễu        (IMU: sạch  →  + nhiễu)",
         color=INK, fontsize=12.5, x=0.045, ha="left", y=0.975)
     figure.savefig(destination, dpi=125, facecolor=SURFACE)
-    plt.close(figure)
+    return figure
 
 
 def main() -> int:
@@ -174,6 +177,8 @@ def main() -> int:
     parser.add_argument("--imu-window", type=int, default=128)
     parser.add_argument("--min-span-px", type=float, default=2.0,
                         help="chỉ nhận frame mà gyro quét được ít nhất bằng này")
+    parser.add_argument("--no-show", action="store_true",
+                        help="chỉ ghi file, không mở cửa sổ")
     parser.add_argument("--attempts", type=int, default=60,
                         help="số lần bốc frame trước khi chấp nhận frame ít chuyển động nhất")
     args = parser.parse_args()
@@ -202,6 +207,7 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     rng = generator(seed, "corruption_stages")
+    figures = []
     print(f"{len(trajectories)} trajectory · seed {seed} "
           f"(chạy lại đúng mẫu này bằng --seed {seed})\n")
 
@@ -251,7 +257,7 @@ def main() -> int:
         sharp_clean = sharpness(clean)
         sharp_blur, sharp_noisy = sharpness(blurred), sharpness(noisy)
         destination = args.out / f"{number:02d}_{name.replace('/', '_')}_f{frame:06d}.png"
-        build_figure({
+        figures.append(build_figure({
             "name": name, "frame": frame, "seed": seed,
             "clean": clean, "blurred": blurred, "noisy": noisy, "kernel": kernel,
             "report": report, "imu_clean": window.astype(np.float64),
@@ -261,7 +267,7 @@ def main() -> int:
             "drop_blur": 100.0 * (sharp_blur / sharp_clean - 1.0),
             "drop_noisy": 100.0 * (sharp_noisy / sharp_clean - 1.0),
             "psnr_blur": psnr(clean, blurred), "psnr_noisy": psnr(clean, noisy),
-        }, destination)
+        }, destination))
 
         print(f"{name} · frame {frame}")
         print(f"   ② mờ do IMU : quét {span:5.2f} px · phơi sáng "
@@ -273,6 +279,7 @@ def main() -> int:
               f"nét {100.0 * (sharp_noisy / sharp_clean - 1.0):+6.1f}% · "
               f"PSNR {psnr(clean, noisy):5.2f} dB")
         print(f"   -> {destination}\n")
+    show_or_close(figures, args.no_show)
     return 0
 
 
