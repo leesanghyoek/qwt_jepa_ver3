@@ -1,10 +1,32 @@
 # Recipe chinh cho Kaggle + dataset TartanAir V2 cua ban (14 environment, 166
 # trajectory, anh 256x256 RGB, IMU 100 Hz, camera 10 Hz).
 #
-# Thu nghiem p1_detail2: neo 0.45, detail phase 1 = 2.0, 8000 update.
-# Phase 2 giu loss hien tai, tat encoder skip, 5000 update. So voi run
-# kaggle_residual045 cu (P1 detail 0.5), can train ca hai phase trong OUT moi.
-# Giu seed, corruption va kich thuoc latent de so sanh; chua tach skip anh/IMU.
+# LAN CHAY NAY sua dung hai dieu do duoc tu log cua run truoc
+# (PSNR 21.25 · SSIM 0.733 · ca 7 chi so vuot baseline):
+#
+#   1. ANH CON MO. encoder_skips dang TAT, nen moi chi tiet phai chui qua co chai
+#      latent 16x16 (moi o mo ta mot khoi 16x16 pixel). Bang chung trong log:
+#      image_detail_l1 chi giam 16,2% trong khi moi so hang khac giam 32-49% —
+#      dung kieu that bai cua mot L1 tren tung he so, vi no duoc toi thieu hoa
+#      bang cach CO he so ve 0. Bat skip lai.
+#
+#   2. IMU CON RUNG. Sai so giua hai mau lien ke / sai so tong = 0,80 (accel) va
+#      0,89 (gyro); ti le ~1.0 nghia la loi khong tuong quan giua cac mau, tuc
+#      RUNG chu khong phai lech. Input la 1,02. So hang DUY NHAT nhin thay rung
+#      la imu_variation_weight — moi so hang khac cham diem tung mau doc lap, nen
+#      mot duong rang cua bam dung bien do khong bi phat gi. Nang 0,5 -> 2,0.
+#
+# Danh doi cua encoder_skips: true — phai noi ro khi bao cao. Do net khi do den
+# mot phan tu ANH DAU VAO chu khong thuan tu latent. Cong skip duoc sinh tu duong
+# latent nen latent van quyet dinh cho bao nhieu di qua, nhung cau "khoi phuc tu
+# latent" mo ta he kem chinh xac hon truoc.
+#
+# LUU Y CHECKPOINT: run truoc train voi corruption.image.motion_from_imu = true.
+# Recipe nay theo quyet dinh moi (anh mo do CAMERA, nhieu IMU do MOI TRUONG, doc
+# lap) nen ke thua motion_from_imu = false tu pipeline_v3.yaml. `corruption` nam
+# trong configuration_hash cua phase 1, nen checkpoint phase 1 cu KHONG dung lai
+# duoc: phai train lai ca hai phase. Phase 2 se tu choi to tieng chu khong am
+# tham chay sai ("Current config does not match the phase-1 training contract").
 #
 # DATA_ROOT phai la thu muc co CON TRUC TIEP la cac environment:
 #   <root>/AmericanDiner/Data_easy/P000/image_lcam_front/*.png
@@ -12,12 +34,12 @@
 # Tro cao hon mot bac se nhat them ban sao trong tartanair-v2-jepa/train va
 # build-manifest se bao loi "Mixed explicit and missing split directories".
 extends: pipeline_v3.yaml
-experiment_name: qwt_jepa_p1_detail2_kaggle
+experiment_name: qwt_jepa_sharp_smooth_kaggle
 
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p1_detail2_trial
+  output_dir: /kaggle/working/qwt_jepa_version4/outputs/p3_sharp_smooth
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   validation_batches: 32
@@ -35,13 +57,17 @@ phase1:
   max_successful_updates: 8000
 
 phase2:
-  encoder_skips: false
-  decoder_input: fused_dense_latent_only
+  # Doi so 1: duong skip mang do phan giai tu anh dau vao. Cong sinh tu duong
+  # latent nen latent quyet dinh cho bao nhieu di qua o tung vi tri.
+  encoder_skips: true
+  skip_gating: true
+  decoder_input: latent_plus_encoder_skips
   input_coefficient_residual: true
   output_coefficients: input_residual
   residual_sees_input: true
   max_successful_updates: 5000
   smooth_l1_beta: 0.05
   reconstruction_detail_weight: 2.0
-  imu_variation_weight: 0.5
+  # Doi so 2: so hang duy nhat phat duoc do rung giua cac mau lien ke.
+  imu_variation_weight: 2.0
   detail_energy_weight: 1.0
