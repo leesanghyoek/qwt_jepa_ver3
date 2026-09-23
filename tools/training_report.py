@@ -249,6 +249,31 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
             findings.append(f"{label}: khôi phục ({restored:.4f}) KHÔNG tốt hơn input "
                             f"({baseline:.4f}) — model đang làm hỏng chỉ số này.")
 
+    # The variation metric is a rate (diff / 0.01 s), so scaling it back to a
+    # per-sample difference makes it comparable with the absolute error. Near 1.0
+    # the consecutive errors are uncorrelated -- jitter, not offset -- and no
+    # per-sample loss term can see that.
+    print("\n  Độ rung IMU — sai số giữa 2 mẫu liền kề / sai số tổng")
+    print(f"  {'':<10}{'input':>20}{'khôi phục':>20}   (càng thấp càng mượt)")
+    for axis in ("accel", "gyro"):
+        rows_ok = True
+        cells = []
+        for prefix in ("validation_baseline_", "validation_"):
+            rmse = final.get(f"{prefix}{axis}_rmse")
+            rate = final.get(f"{prefix}{axis}_variation_rmse")
+            if not isinstance(rmse, (int, float)) or not isinstance(rate, (int, float)) or not rmse:
+                rows_ok = False
+                break
+            cells.append(rate * 0.01 / rmse)
+        if not rows_ok:
+            continue
+        print(f"  {axis:<10}{cells[0]:>20.2f}{cells[1]:>20.2f}")
+        if cells[1] > 0.6:
+            findings.append(
+                f"{axis}: sai số giữa hai mẫu liền kề còn {cells[1]:.2f}x sai số tổng "
+                "— lỗi gần như toàn bộ là RUNG, không phải lệch. imu_variation_weight là "
+                "số hạng duy nhất nhìn thấy điều này.")
+
     score_key = "validation_joint_validation_score"
     scored = [r for r in rows if isinstance(r.get(score_key), (int, float))]
     if scored:
@@ -318,6 +343,9 @@ def config_section(run: Path) -> None:
         ("phase2.encoder_skips", ("phase2", "encoder_skips")),
         ("phase2.reconstruction_detail_weight", ("phase2", "reconstruction_detail_weight")),
         ("phase2.detail_energy_weight", ("phase2", "detail_energy_weight")),
+        ("phase2.imu_variation_weight", ("phase2", "imu_variation_weight")),
+        ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
+        ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]
     for label, keys in interesting:
         node = config
