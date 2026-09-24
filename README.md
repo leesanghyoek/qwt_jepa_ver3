@@ -1,28 +1,29 @@
-# QWT–JEPA v3 cho ảnh thiếu nhiễu sáng và IMU
+# QWT–JEPA v3 cho ảnh thiếu sáng, mờ và IMU nhiễu
 
-Source: [leesanghyoek/qwt_jepa_ver3](https://github.com/leesanghyoek/qwt_jepa_ver3).
-Trên Kaggle, bắt đầu từ [Cell 1: clone GitHub](KAGGLE_TRAIN_CELLS.md#cell-1--clone-source-từ-github-và-ghi-lại-commit),
-sau đó chạy lần lượt các cell train và đánh giá.
+Source: [leesanghyoek/qwt_jepa_ver4](https://github.com/leesanghyoek/qwt_jepa_ver4),
+nhánh `main`. Trên Kaggle dùng notebook
+[`qwt-jaco-jepa-ver4.ipynb`](qwt-jaco-jepa-ver4.ipynb): Cell 1 clone source và ghim
+commit, rồi chạy lần lượt các cell.
 
-Lần thử Kaggle hiện tại dùng `configs/kaggle_tartanair_v2.yaml`: phase 1
-**8.000 update, neo 0,45, detail 2,0**; phase 2 **5.000 update, encoder skip tắt**,
-head đọc hệ số input, beta 0,05 / detail 2,0 / variation 0,5 / energy 1,0.
-Dùng OUT mới `outputs/p1_detail2_trial` để so với run phase 1 detail 0,5 trước đó.
-Notebook cũ cần thay toàn bộ Cell 4 theo tài liệu; các override cũ không tự mất
-khi clone source mới. Các sơ đồ bên dưới mô tả cả đường skip tùy chọn; đường đó
-không hoạt động trong recipe Kaggle này. Lưu archive ở Cell 14 sau phase 1 và
-sau phase 2 để giữ checkpoint qua phiên.
+Pipeline hai giai đoạn. **Phase 1**: JEPA học latent — encoder đọc ảnh + IMU
+**nhiễu** và học dự đoán latent mà teacher EMA tạo từ bản **sạch**, kèm
+variance/covariance chống collapse, một decoder neo và số hạng Jacobian. **Phase 2**:
+backbone đóng băng, chỉ train decoder khôi phục — ResNet trên pixel cho ảnh,
+decoder hệ số Haar cho IMU.
 
-Repository này triển khai pipeline hai giai đoạn theo
-`QWT_JEPA_JACOBIAN_MIGRATION_GUIDE.md` và
-`QWT_JEPA_V3_DETAILED_ARCHITECTURE_DIAGRAMS.md`:
+Run Kaggle hiện tại là **p7** (`configs/kaggle_tartanair_v2.yaml`, OUT
+`outputs/p7_resnet`): phase 1 **dùng lại** checkpoint của p5 (5.000 update, neo 0,45,
+detail 2,0, Jacobian tỉ số 0,05); phase 2 5.000 update với **decoder ảnh ResNet trên
+pixel**, loss chi tiết chấm trên ảnh khôi phục (L1 hệ số · 2,0, energy · 1,0), IMU
+giữ decoder hệ số với skip có cổng, sai phân bậc một IMU · 2,0.
 
-## Tài liệu chạy Kaggle và kiến trúc thực tế
+## Tài liệu
 
-- [Các cell Kaggle, train, resume, đồ thị và kết quả](KAGGLE_TRAIN_CELLS.md).
-- [Sơ đồ kiến trúc chi tiết và quy trình train](KIEN_TRUC_VA_QUY_TRINH_TRAIN.md).
-- [Kết quả kiểm tra code và giới hạn còn lại](CODE_REVIEW_KAGGLE.md).
-- [**Kiến trúc: trước và sau**](KIEN_TRUC_TRUOC_VA_SAU.md) — so sánh từng thay đổi kèm phép đo.
+- [**Kiến trúc: trước và sau**](KIEN_TRUC_TRUOC_VA_SAU.md) — so sánh từng thay đổi
+  kèm phép đo.
+- Notebook Kaggle [`qwt-jaco-jepa-ver4.ipynb`](qwt-jaco-jepa-ver4.ipynb). Cell 18 in
+  báo cáo train (`tools/training_report.py`), gồm cả độ nét thật và độ sọc so với ảnh
+  sạch.
 
 Backend ảnh mặc định là `qwt_dualtree_hilbert`: **cặp Hilbert thật**, thiết kế
 bằng liệt kê phân tích phổ (`tools/design_hilbert_pair.py`), 14 tap, đo được
@@ -45,28 +46,26 @@ Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng địn
 | **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
 | **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **ResNet trên pixel**: ảnh mờ ở độ phân giải đầy đủ (skip) + latent JEPA → phần residual cộng vào ảnh mờ (`image_decoder: resnet_pixel`); tái tạo đúng chỗ nhiều đường nét hơn (0,309 → 0,359) | `tests/test_resnet_decoder.py` |
 
-**Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
-phân phối blur đã đổi, nên checkpoint phase 1 cũ không còn so sánh được. Đây là
-đứt gãy thật, không phải đổi tên: `model.image_transform` là một phần của
-configuration hash.
+**Phase 1 nào dùng lại được.** Đổi QWT (db4 → Hilbert) là đứt gãy thật:
+`model.image_transform` nằm trong configuration hash, nên checkpoint thời db4 không
+dùng được. Từ p5 trở đi phase 1 không đổi (hash `ef8ef433`); ba thay đổi sau đó — loss
+chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7 dùng lại phase 1 của p5.
 
-**Chạy ba lệnh này trước khi train:**
+**Kiểm tra trước khi train:**
 
 ```bash
-# 1. Xác nhận hình học gyro→camera trên chính dataset của bạn
-python3 tools/imu_blur_axis_check.py --data-root <root> --trajectories 12
-
-# 2. Xem lại thiết kế bộ lọc (và đổi bậc nếu muốn)
+# Thiết kế bộ lọc (và đổi bậc nếu muốn)
 python3 tools/design_hilbert_pair.py --orders 4 6 7 8
 
-# 3. Toàn bộ test
-python3 -m pytest tests/ -q
+# Toàn bộ test
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/ -q
 ```
 
-**Ablation có sẵn, không cần sửa code:** đặt `model.image_transform:
-qwt_dualtree_db4` để quay về transform cũ, và `corruption.image.motion_from_imu:
-true` để nối blur với IMU. Mặc định hiện tại là transform Hilbert + blur độc lập
-với IMU.
+**Ablation có sẵn, không cần sửa code:** `phase2.image_decoder: qwt_coefficients`
+quay về decoder ảnh hệ số; `model.image_transform: qwt_dualtree_db4` quay về
+transform cũ; `corruption.image.motion_from_imu: true` nối blur với IMU (khi đó chạy
+`tools/imu_blur_axis_check.py` để xác nhận hình học gyro→camera). Mặc định: QWT
+Hilbert, blur do camera độc lập với nhiễu IMU, decoder ảnh ResNet.
 
 ## Vì sao ảnh vẫn mờ, và vì sao p5 ra sọc
 
@@ -154,30 +153,33 @@ dùng lại được.
 ```mermaid
 flowchart LR
     CL["Ảnh + IMU<br/><b>SẠCH</b>"]
-    GY["gyro sạch"]
-    KER["tích phân trên<br/>phơi sáng<br/>⇒ <b>kernel blur</b>"]
+    CAM["<b>Camera</b><br/>mờ · tối · nhiễu hạt<br/>JPEG"]
+    ENV["<b>Môi trường</b><br/>nhiễu trắng · bias<br/>rung · spike"]
     NZ["Ảnh + IMU<br/><b>NHIỄU</b>"]
     BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
     Z["<b>②</b> ZI · ZU"]
     L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
     D["<b>③ Phase 2</b><br/>ResNet trên pixel<br/>ảnh mờ + ZI"]
     R["Ảnh + IMU<br/>phục hồi"]
-    CL --> GY --> KER --> NZ --> BB --> Z
-    CL --> NZ
+    CL -- ảnh --> CAM --> NZ
+    CL -- IMU --> ENV --> NZ
+    NZ --> BB --> Z
     Z --> L1
     Z --> D --> R
     CL -. "teacher EMA · đích của neo" .-> L1
     classDef d fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
     classDef l fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
-    class GY,KER d
+    class CAM,ENV d
     class Z l
 ```
 
-Khối ① là thay đổi cấu trúc lớn nhất. Trước đây blur được **bốc ngẫu nhiên** độc
-lập với IMU, nên cửa sổ IMU không mang một bit nào về cách ảnh bị làm mờ — có thể
-xoá hẳn nhánh IMU mà metric ảnh gần như không đổi. Giờ blur là chuyển động thật
-tích phân trên thời gian phơi sáng, còn nhánh IMU chỉ nhận **bản nhiễu** của
-chính chuyển động đó. Khoảng cách giữa hai thứ là bài toán.
+Hai nguồn hỏng **độc lập**: ảnh mờ, tối và nhiễu hạt do **camera** (defocus, blur
+chuyển động bốc ngẫu nhiên, giảm độ phân giải, phơi sáng thấp, shot/read noise,
+JPEG); IMU nhiễu do **môi trường** (nhiễu trắng, bias trôi, rung 8–45 Hz, spike,
+dropout). Mỗi frame bốc tham số riêng. Vì độc lập, cửa sổ IMU không mang thông tin
+về cách ảnh bị làm mờ; mỗi nhánh học khôi phục chính nó, và hai nhánh chỉ gặp nhau
+ở fusion của latent. Đường nối blur với gyro vẫn còn trong code
+(`motion_from_imu: true`) nhưng tắt.
 
 Phase 1 **có** một decoder phụ làm *neo*: nó chấm điểm latent trên hệ số wavelet
 sạch với trọng số `0.45`, rồi bị vứt bỏ khi phase 1 kết thúc. Không có neo này
@@ -239,7 +241,7 @@ flowchart TB
     CLEAN["Ảnh + IMU <b>SẠCH</b><br/>chỉ tồn tại lúc train"]
     TE["<b>Teacher EMA</b><br/>bản sao 2 encoder · KHÔNG gradient<br/>m: 0,99 → 0,999"]
     PR["<b>Predictor</b> mỗi modality · 66 K<br/>LN → 128→256 → GELU → 256→128<br/>256 token ảnh · 8 token IMU"]
-    AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>cùng kiến trúc decoder phase 2<br/>bị vứt khi phase 1 kết thúc"]
+    AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>decoder hệ số, chỉ đọc latent<br/>bị vứt khi phase 1 kết thúc"]
     JE(["<b>JEPA loss</b> · trọng số 1,0<br/>online nhiễu ≈ teacher sạch"])
     VC(["<b>Variance 1,0 + Covariance 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch"])
     PN["probe <b>NHIỄU</b><br/>clean + ε·(noisy−clean)"]
@@ -438,8 +440,10 @@ Teacher ăn dữ liệu **sạch**, online ăn dữ liệu **nhiễu**.
 `LayerNorm → Linear(128→256) → GELU → Linear(256→128)`. Token ảnh là `16×16 = 256`
 vị trí, token IMU là `8` vị trí. Nó dự đoán latent của teacher từ latent online.
 
-**Decoder neo**: cùng kiến trúc decoder phase 2 nhưng **hệ số tuyệt đối**, chấm
-điểm trên hệ số wavelet sạch, trọng số 0,45. Bị vứt sau phase 1.
+**Decoder neo**: decoder hệ số (cùng loại decoder IMU phase 2, và decoder ảnh cũ
+`qwt_coefficients`), chỉ đọc latent, dự đoán **hệ số tuyệt đối**, chấm điểm trên hệ
+số wavelet sạch, trọng số 0,45. Bị vứt sau phase 1; `phase2.image_decoder` không bao
+giờ chạm tới nó.
 
 **Encoder sensitivity (khối Jacobian)** — *đã viết lại*. Bản cũ đo **một** hướng
 Rademacher ngẫu nhiên rồi tối thiểu hoá gain đó: một phạt co **đẳng hướng**, tức
@@ -622,19 +626,27 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/training/phase1.py`: noisy-to-clean latent prediction, teacher EMA,
   variance/covariance trên tám raw maps, và Jacobian **bất đẳng hướng** trước
   fusion — tỉ số độ nhạy nhiễu / độ nhạy tín hiệu, xem mục trên.
-- `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro, cộng hai số hạng
+- `qjepa/training/phase2.py`: L1 pixel + SmoothL1 accel/gyro, cộng các số hạng
   tần số cao. **Băng chi tiết** (LH/HL/HH của ảnh và nửa detail của Haar IMU,
   trọng số `2.0`) vì L1 pixel tối ưu về trung vị có điều kiện, mà với bài toán
-  bất định như khử mờ thì trung vị đó *chính là ảnh mờ*. **Sai phân bậc một của
-  IMU** (`imu_variation_weight: 0.5`) vì mọi số hạng khác chấm điểm từng mẫu độc
-  lập, nên tín hiệu giật từng mẫu không bị phạt. `smooth_l1_beta: 0.05` giữ sai
-  số IMU (`|x| ≈ 0,12`) trong vùng tuyến tính; ở `1.0` gradient yếu gấp 8 lần.
-  Optimizer chỉ chứa decoder.
+  bất định như khử mờ thì trung vị đó *chính là ảnh mờ*. Băng chi tiết ảnh được chấm
+  trên **hệ số của ảnh khôi phục** (`image_detail_source: restored_image`), không
+  trên hệ số decoder xuất ra. **Khớp năng lượng đường nét** (`detail_energy_weight:
+  1.0`). **Sai phân bậc một của IMU** (`imu_variation_weight`) vì mọi số hạng khác
+  chấm điểm từng mẫu độc lập, nên tín hiệu giật từng mẫu không bị phạt.
+  `smooth_l1_beta: 0.05` giữ sai số IMU (`|x| ≈ 0,12`) trong vùng tuyến tính; ở
+  `1.0` gradient yếu gấp 8 lần. Optimizer chỉ chứa decoder.
+- `qjepa/evaluation/metrics.py`: PSNR, SSIM, MAE, và hai tỉ số phổ so với ảnh sạch —
+  `image_edge_power` (chu kỳ 4–16 px, đường nét thật) và `image_stripe_power`
+  (chu kỳ 2 px, sọc) — vì PSNR/SSIM không phân biệt được làm nét thật với một mẫu
+  tần số cao cố định.
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.
-- `configs/kaggle_tartanair_v2.yaml`: thử phase 1 detail 2,0 trong 8.000 update;
-  phase 2 tắt skip, 5.000 update, workers 0 và pin memory tắt trên Kaggle.
+- `configs/kaggle_tartanair_v2.yaml`: recipe Kaggle p7, kế thừa `pipeline_v3.yaml`
+  (decoder ảnh ResNet, loss chi tiết trên ảnh khôi phục); `imu_variation_weight: 2.0`,
+  skip bật cho IMU. Notebook ghi đè số update phase 1 thành 5.000 và dùng lại phase 1
+  của p5.
 
 ## Chuẩn bị môi trường
 
@@ -697,9 +709,8 @@ một frame và 128 hàng IMU liên tục; không padding và không nối qua t
 cao hơn một bậc sẽ nhặt thêm bản sao khác của dataset; nếu bản sao đó nằm dưới
 thư mục tên `train/valid/test` thì build-manifest dừng và nêu tên thư mục vi phạm.
 
-Với dataset TartanAir V2 trên Kaggle, xem [kaggle_dataset.md](kaggle_dataset.md):
-đối chiếu từng điểm với loader, cách split 83 motion key, và vì sao khoảng 13
-frame mỗi trajectory bị loại (window 1,27 s phải bao quanh thời điểm chụp).
+Khoảng 13 frame mỗi trajectory bị loại vì window IMU 1,27 s phải bao quanh thời
+điểm chụp.
 
 Tạo manifest và thống kê normalization từ các timestamp train sạch, mỗi timeline
 trùng hoàn toàn chỉ được tính một lần:
@@ -779,10 +790,11 @@ Mỗi checkpoint in một dòng so sánh trực tiếp với baseline "không l�
 validation update=250 | PSNR 11.43 vs 11.40 | SSIM 0.289 vs 0.289 | accel 0.612 vs 0.613 | VUOT baseline
 ```
 
-Vì head zero-init, dòng validate **đầu tiên** đã phải là `VUOT baseline`. Nếu nó
-báo `chua vuot` ngay lần đầu thì residual chưa thực sự bật — kiểm
-`phase2.input_coefficient_residual` và `phase2.output_coefficients` trong config
-đang dùng. `validate_config` từ chối config mà hai trường này mâu thuẫn nhau, nên
+Vì lớp cuối zero-init (conv cuối của ResNet ảnh, head của decoder hệ số), trước
+update đầu tiên đầu ra đúng bằng đầu vào; dòng validate đầu tiên phải ít nhất ngang
+baseline. Nếu nó tệ hơn hẳn thì residual chưa thực sự bật — kiểm
+`phase2.image_decoder`, `phase2.input_coefficient_residual` và
+`phase2.output_coefficients` trong config đang dùng. `validate_config` từ chối config mà hai trường này mâu thuẫn nhau, nên
 file không thể mô tả sai việc decoder đang làm gì.
 
 ## Đánh giá và inference
@@ -828,31 +840,31 @@ test của project không phụ thuộc ROS.
 
 ## Kết quả đã đo được
 
-Đo trên TartanAir V2, split test, so với baseline "đưa thẳng input nhiễu ra":
+Run Kaggle trên TartanAir V2, validation, cùng baseline "đưa thẳng input ra"
+(PSNR 16,89 dB · SSIM 0,627):
 
-| Cấu hình | Probe tuyến tính (IMU / ảnh) | PSNR | Baseline |
-|---|---|---|---|
-| Không neo phase 1 | 17% / 25% | thua baseline ở cả bốn metric | — |
-| Neo `0.30`, head tuyệt đối | 43% / 49% | 17.87 | 16.56 |
-| Neo `0.45`, head residual | *chưa train lại* | — | — |
+| Run | Thay đổi | PSNR | SSIM | Ghi chú |
+|---|---|---|---|---|
+| p3 | decoder hệ số, skip tắt | 21,11 | — | ảnh sáng lên nhưng không nét hơn |
+| p4 | + skip độ phân giải đầy đủ | 21,87 | 0,735 | chi tiết không cải thiện (sai số chi tiết giảm 14,4% so với 15,2%) |
+| p5 | + loss modulus `\|q\|` | 22,02 | 0,740 | **ra sọc**, vẫn mờ — xem mục sọc ở trên |
+| p6 | loss chấm trên ảnh, bỏ modulus | — | — | không chạy: A/B cục bộ cho thấy ResNet tốt hơn |
+| **p7** | **decoder ảnh ResNet trên pixel** | *đang chạy* | | |
 
-**Probe tuyến tính** là hồi quy ridge từ latent đã đóng băng về mục tiêu sạch. Nó
-là *cận dưới* của lượng thông tin rút được từ latent, và là chỉ số cho biết neo
-có tác dụng hay không, độc lập với chất lượng decoder.
+A/B cục bộ phía sau p7 (cùng phase 1, 600 update) nằm ở mục
+[Decoder ảnh ResNet](#decoder-ảnh-resnet-p7): đường nét tái tạo đúng chỗ 0,309 → 0,359.
+Ảnh đầu vào bị hỏng rất nặng, nên ngay cả ResNet cũng chỉ lấy lại được một phần đường
+nét của ảnh sạch.
 
-Giới hạn còn lại, đo bằng protocol 10 kịch bản: đầu ra của cấu hình "neo 0.30,
-head tuyệt đối" **gần như độc lập với đầu vào** — input trải 107.4 dB PSNR thì
-output chỉ nhúc nhích 1.94 dB, và một input gần sạch bị phá (`blur_only` vào
-37.5 dB, ra 15.7 dB). Đó chính là lý do có residual. Nút thắt **không** nằm ở
-decoder: decoder đã rút được 62–74% trong khi probe tuyến tính chỉ rút 43%, nên
-thêm ResNet hay pointwise vào decoder không giải quyết được gì — giới hạn là số
-chiều của `ZI`, mỗi ô latent phủ một khối 16×16 pixel.
+ResNet đọc thẳng ảnh mờ, nên một phần độ nét đến từ chính ảnh đầu vào chứ không
+thuần từ latent. Phần latent JEPA đóng góp được đo bằng `delta_report.py
+--ablate-latent` (Cell 14 của notebook): đặt `ZI/ZU = 0` rồi so sai số.
 
-`encoder_skips` giờ đã cài và **bật mặc định** — nhưng nó mua độ nét bằng cách
-lấy chi tiết từ ảnh đầu vào, nên hãy đọc con số kèm theo `decoder_input:
-latent_plus_encoder_skips` chứ đừng gọi đó là khôi phục thuần từ latent.
+**Probe tuyến tính** (hồi quy ridge từ latent đóng băng về mục tiêu sạch) là cận dưới
+của lượng thông tin rút được từ latent, độc lập với decoder: không neo phase 1 thì
+17% / 25% (IMU / ảnh), neo 0,30 thì 43% / 49%.
 
-Chưa làm: latent đa tỉ lệ, và adversarial loss.
+Chưa dùng: latent đa tỉ lệ, adversarial loss.
 
 ## Giới hạn dữ liệu
 

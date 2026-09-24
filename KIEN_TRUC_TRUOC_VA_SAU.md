@@ -3,6 +3,9 @@
 So sánh giữa `d06d214` (trước) và `fc9ebcf` (sau). Mọi con số trong tài liệu này
 đều **đo được**, kèm lệnh tái lập; không có số nào là ước lượng.
 
+> Mục 1–8 là đợt thay đổi QWT + Jacobian. **Phase 2 đổi tiếp sau đó** (loss chi
+> tiết, cách chấm loss, decoder ảnh ResNet): xem [mục 9](#9-sau-đó-phase-2-từ-p5-đến-p7).
+
 ---
 
 ## 1. Tóm tắt
@@ -17,7 +20,7 @@ So sánh giữa `d06d214` (trước) và `fc9ebcf` (sau). Mọi con số trong t
 | Trọng số Jacobian | `1e-4` (trơ) | `0,05` (có tác dụng) | ×500 |
 | Số tham số backbone | 1.333.120 | 1.333.120 | **không đổi** |
 | Latent `ZI` | `128 × 16 × 16` | `128 × 16 × 16` | **không đổi** |
-| Loss phase 2 | L1 + detail + energy + variation | y hệt | **không đổi** |
+| Loss phase 2 | L1 + detail + energy + variation | y hệt | không đổi ở đợt này — [đổi sau đó](#9-sau-đó-phase-2-từ-p5-đến-p7) |
 | Test | 100 | 111 | +11 |
 
 Ba thay đổi, không thay đổi nào chạm vào số tham số hay kích thước latent. Đây
@@ -377,3 +380,61 @@ python3 tools/capacity_ceiling.py --config <cfg> --manifest <man> --split valid
 # Toàn bộ test
 python3 -m pytest tests/ -q     # 111 passed
 ```
+
+---
+
+## 9. Sau đó: phase 2 từ p5 đến p7
+
+Phase 1 giữ nguyên từ p5 (hash `ef8ef433`), nên mọi thay đổi dưới đây chỉ train lại
+phase 2.
+
+| | Trước (p4) | p5 | Hiện tại (p7) |
+|---|---|---|---|
+| **Decoder ảnh** | latent 16×16 → 48 kênh hệ số QWT → synthesis | như p4 | **ResNet trên pixel**: ảnh mờ 256×256 (skip) + `ZI` → residual cộng vào ảnh mờ |
+| **Loss chi tiết ảnh** | L1 trên từng hệ số | L1 trên modulus `\|q\|` | L1 trên từng hệ số |
+| **Chấm loss trên** | 48 kênh decoder xuất ra | 48 kênh decoder xuất ra | **hệ số của ảnh khôi phục** |
+| Decoder IMU | hệ số Haar, skip có cổng | như p4 | như p4 |
+| Tham số decoder ảnh | 1.577.392 | 1.577.392 | **799.811** |
+| Chỉ số độ nét | PSNR, SSIM | PSNR, SSIM | + đường nét thật (4–16 px), sọc (2 px) |
+
+### Vì sao bỏ cách chấm cũ
+
+QWT giữ 4 cây và synthesis lấy trung bình 4 cây, nên 48 kênh hệ số dư 4 lần: phần
+nằm trong null space của synthesis không hiện lên ảnh. Đo trên frame thật, giữ ảnh
+y nguyên (lệch tối đa 1e-7) mà vẫn hạ được modulus 63%, L1 hệ số 41%, energy gap
+68%. p5 cất 34% năng lượng chi tiết vào đó. Chấm trên hệ số của ảnh khôi phục thì
+phần gradient đi vào chỗ vô hình giảm từ 50–67% xuống ~1e-7
+(`tests/test_image_detail_source.py`).
+
+### Vì sao bỏ modulus
+
+Modulus và energy chỉ hỏi "đủ năng lượng chi tiết chưa", không hỏi "đặt đúng chỗ
+chưa". Một hệ số chi tiết lệch đều tổng hợp ra đúng sọc chu kỳ 2 px (LH → ngang,
+HL → dọc, HH → ô bàn cờ) — đó là sọc thấy ở p5. A/B cục bộ, cùng phase 1, 600 update,
+chấm trên ảnh: modulus + energy → sọc 3,21× ảnh sạch; L1 hệ số + energy → 0,14×.
+
+### Vì sao đổi sang ResNet
+
+A/B cục bộ, cùng phase 1, cùng loss, 600 update, 32 frame valid. "Đúng chỗ" là phần
+đường nét của ảnh sạch được tái tạo đúng pha trên dải 4–16 px (1 = hoàn hảo):
+
+| decoder ảnh | PSNR | SSIM | đường nét đúng chỗ | sai số dải cạnh |
+|---|---|---|---|---|
+| input | 11,13 | 0,501 | 0,285 | 0,546 |
+| hệ số QWT | 16,40 | 0,558 | 0,309 | 0,520 |
+| **ResNet + latent** | 16,04 | 0,572 | **0,359** | **0,465** |
+
+Ba biến thể decoder hệ số trước đó (chỉ latent, không skip, skip đầy đủ) dừng ở cùng
+một mức chi tiết; cả ba chỉ chạm tới ảnh qua hệ số dựng từ latent 16×16. ResNet đọc
+thẳng ảnh mờ ở 256×256 và hơn cả ba dù ít tham số hơn một nửa. Phần latent JEPA đóng
+góp cho ResNet được đo trên checkpoint thật bằng `delta_report.py --ablate-latent`.
+
+| file | thay đổi |
+|---|---|
+| `qjepa/models/decoders.py` | `PixelResNetDecoder`, chọn bằng `phase2.image_decoder` |
+| `qjepa/models/pipeline.py` | `decode` dựng ảnh mờ từ hệ số input (tái tạo hoàn hảo) rồi chạy ResNet |
+| `qjepa/training/phase2.py` | `image_detail_source`, log `image_detail_invisible_fraction` |
+| `qjepa/evaluation/metrics.py` | `image_edge_power`, `image_stripe_power` |
+| `tests/test_resnet_decoder.py`, `tests/test_image_detail_source.py` | **mới** |
+
+Test: 141 passed.
