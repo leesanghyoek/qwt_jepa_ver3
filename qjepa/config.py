@@ -154,6 +154,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.detail_energy_weight cannot be negative")
     if phase2.get("image_detail_loss", "coefficient") not in ("coefficient", "modulus"):
         raise ValueError("phase2.image_detail_loss must be coefficient or modulus")
+    if phase2.get("image_detail_source", "decoder_coefficients") not in ("decoder_coefficients", "restored_image"):
+        raise ValueError("phase2.image_detail_source must be decoder_coefficients or restored_image")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
     scenarios = phase2.get("train_scenarios")

@@ -39,7 +39,7 @@ experiment_name: qwt_jepa_sharp_smooth_kaggle
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p5_modulus
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p6_no_stripes
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   validation_batches: 32
@@ -71,6 +71,13 @@ phase2:
   # Doi so 2: so hang duy nhat phat duoc do rung giua cac mau lien ke.
   imu_variation_weight: 2.0
   detail_energy_weight: 1.0
-  # Doi so 3 (p5): so hang chi tiet anh do tren modulus |q| thay vi tung he so.
-  # Chi doi phase 2, nen checkpoint phase 1 cua p4 dung lai duoc nguyen ven.
-  image_detail_loss: modulus
+  # p5 dung modulus |q| va ra anh co SOC. modulus + detail_energy deu chi hoi "du
+  # nang luong chi tiet chua", khong hoi "dung cho chua"; nang luong re nhat la mot
+  # he so chi tiet lech deu, tong hop ra soc chu ky 2 px. Tro ve coefficient (xem
+  # pipeline_v3.yaml).
+  image_detail_loss: coefficient
+  # p6: cham so hang chi tiet tren ANH KHOI PHUC chu khong tren he so decoder. QWT
+  # du 4 lan, synthesis lay trung binh 4 cay: p5 cat 34% nang luong chi tiet vao
+  # phan synthesis vut di — loss giam ma anh khong doi. Chi doi phase 2 -> dung
+  # lai phase 1 cua p5.
+  image_detail_source: restored_image

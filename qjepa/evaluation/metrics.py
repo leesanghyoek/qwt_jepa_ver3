@@ -28,6 +28,42 @@ def _ssim(restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
     return score.mean()
 
 
+def _luma_power(image: torch.Tensor) -> torch.Tensor:
+    """Windowed luma power spectrum, summed over the batch."""
+    luma = image[:, 0] * 0.299 + image[:, 1] * 0.587 + image[:, 2] * 0.114
+    height, width = luma.shape[-2:]
+    window = torch.outer(
+        torch.hann_window(height, periodic=False, dtype=luma.dtype, device=luma.device),
+        torch.hann_window(width, periodic=False, dtype=luma.dtype, device=luma.device),
+    )
+    luma = (luma - luma.mean(dim=(-2, -1), keepdim=True)) * window
+    return torch.fft.fft2(luma).abs().square().sum(0)
+
+
+def spectral_ratios(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, float]:
+    """Edge-band and stripe power of ``restored``, each relative to ``clean``.
+
+    PSNR/SSIM cannot tell real sharpening from a fixed high-frequency pattern.
+    ``image_edge_power`` is the power at periods of 4-16 px, where edges and
+    texture live: 1.0 means as much as the clean frame. ``image_stripe_power`` is
+    the power on the Nyquist lines (period 2 px), where a smooth offset in a QWT
+    detail band lands in full: LH -> horizontal stripes, HL -> vertical, HH ->
+    checkerboard. It is floored at 0.1% of the clean frame's power so smooth
+    frames do not divide by ~0. Well above 1 means stripes the clean frame lacks.
+    """
+    got, want = _luma_power(restored), _luma_power(clean)
+    height, width = got.shape
+    fy = torch.fft.fftfreq(height, device=got.device).abs()[:, None]
+    fx = torch.fft.fftfreq(width, device=got.device).abs()[None, :]
+    band = torch.maximum(fy, fx)
+    edge = (band >= 1 / 16) & (band < 1 / 4)
+    stripe = (fy >= 0.5 - 2 / height) | (fx >= 0.5 - 2 / width)
+    return {
+        "image_edge_power": float(got[edge].sum() / want[edge].sum().clamp_min(1e-12)),
+        "image_stripe_power": float(got[stripe].sum() / (want[stripe].sum() + 1e-3 * want.sum()).clamp_min(1e-12)),
+    }
+
+
 def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, float]:
     restored = restored.clamp(0.0, 1.0)
     clean = clean.clamp(0.0, 1.0)
@@ -39,6 +75,7 @@ def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, floa
         "image_mae": float(mae),
         "image_psnr_db": float(psnr),
         "image_ssim": float(_ssim(restored, clean)),
+        **spectral_ratios(restored, clean),
     }
 
 

@@ -42,7 +42,7 @@ Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳ
 | **QWT** | 4 cây db4 lệch 1 mẫu. Không phải cặp Hilbert; năng lượng tần số âm **0,1814** | Cặp Hilbert thiết kế riêng, 14 tap, **0,0677** (tốt hơn 2,68×) | `tests/test_qwt_analyticity.py` |
 | **Blur ảnh** | bốc ngẫu nhiên, độc lập với IMU | **giữ nguyên** (quyết định 23/09), nhưng đường nối IMU đã dựng xong và bật được bằng `motion_from_imu: true` | `tests/test_imu_motion_blur.py` |
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
-| **Loss chi tiết ảnh** | L1 trên từng hệ số — tối ưu khi chi tiết chỉ còn **0,25×** (tức thưởng cho ảnh mờ) | L1 trên **modulus quaternion** `\|q\|` — tối ưu ở **1,25×** | `tests/test_detail_modulus_loss.py` |
+| **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
 
 **Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
 phân phối blur đã đổi, nên checkpoint phase 1 cũ không còn so sánh được. Đây là
@@ -67,46 +67,45 @@ qwt_dualtree_db4` để quay về transform cũ, và `corruption.image.motion_fr
 true` để nối blur với IMU. Mặc định hiện tại là transform Hilbert + blur độc lập
 với IMU.
 
-## Vì sao ảnh vẫn mờ, và loss modulus
+## Vì sao ảnh vẫn mờ, và vì sao p5 ra sọc
 
-Ba decoder rất khác nhau dừng ở cùng một sai số chi tiết (`detail_band_l1` ≈ 0,0144):
-decoder neo phase 1 chỉ đọc latent, decoder phase 2 không skip, và decoder phase 2
-có skip độ phân giải đầy đủ. Cho decoder thấy thêm ảnh đầu vào không kéo mức đó
-xuống, nên mức đó do **hàm loss** đặt, không phải do kiến trúc. Một ResNet chỉ là
-decoder thứ tư và sẽ dừng ở cùng chỗ.
+**1. Loss chấm sai chỗ.** QWT giữ 4 cây và synthesis lấy trung bình 4 cây, nên 48
+kênh hệ số decoder xuất ra dư 4 lần: phần nằm trong null space của synthesis không
+hiện lên ảnh. Trước đây mọi số hạng chi tiết ảnh chấm trên chính 48 kênh đó. Đo trên
+một frame thật, giữ ảnh y nguyên (lệch tối đa 1e-7) mà vẫn hạ được modulus **63%**,
+L1 hệ số **41%**, energy gap **68%**. Trong lúc train, p5 cất **34%** năng lượng chi
+tiết vào phần vô hình đó. `phase2.image_detail_source: restored_image` phân tích lại
+chính ảnh khôi phục rồi mới chấm, nên chỉ cái người xem thấy mới được tính. Gradient
+đi vào phần vô hình giảm từ 50–67% xuống ~1e-7.
 
-Cơ chế: khi vị trí cạnh không chắc (lệch dưới 1 px), hệ số chi tiết đổi dấu và độ lớn
-theo vị trí, nên L1 trên từng hệ số được tối thiểu hoá bằng cách **co về 0**. Đo trên
-ảnh TartanAir thật:
+**2. Modulus và energy không xét pha.** Hai số hạng này chỉ hỏi "đủ năng lượng chi
+tiết chưa", không hỏi "đặt đúng chỗ chưa". Một hệ số chi tiết lệch **đều** tổng hợp
+ra đúng sọc chu kỳ 2 px: LH → sọc ngang, HL → sọc dọc, HH → ô bàn cờ. Decoder đọc
+latent 16×16 tạo ra những trường trơn như vậy rất dễ, nên đó là "chi tiết" rẻ nhất nó
+mua được. Về lý thuyết, modulus tối ưu ở đúng độ mạnh cạnh (s = 1,0 so với 0,5 của L1
+hệ số khi cạnh lệch ±0,75 px), nhưng decoder tìm ra một nghiệm rẻ hơn thế.
 
-| | L1 trên hệ số | L1 trên modulus `\|q\|` |
-|---|---|---|
-| cạnh lệch ±0,75 px, ứng viên = chi tiết sạch × s | tối ưu ở s = **0,5** | tối ưu ở s = **1,0** |
-| nhiễu thật (full), ứng viên = chi tiết input × s | tối ưu ở s = **0,25** | tối ưu ở s = **1,25** |
+A/B cục bộ, cùng phase 1, 600 update phase 2, 32 frame valid (kịch bản full), đo
+trên ảnh khôi phục (`validation_image_*_power`, 1,00 = như ảnh clean):
 
-Modulus quaternion gần như bất biến khi cạnh dịch dưới 1 px — chính tính chất cặp
-Hilbert được thiết kế để có — nên nó không phạt cạnh hơi lệch và nghiệm tối ưu là
-**đúng độ mạnh cạnh**. `phase2.image_detail_loss: modulus` thay số hạng chi tiết ẢNH
-bằng số hạng này (IMU không đổi, cùng trọng số `reconstruction_detail_weight`).
-`image_detail_l1` theo hệ số vẫn được ghi log để so với mọi run trước.
+| nhánh | PSNR | cạnh thật (chu kỳ 4–16 px) | sọc (chu kỳ 2 px) |
+|---|---|---|---|
+| input | 11,13 | 0,116 | 0,17 |
+| p5: modulus + energy, chấm trên hệ số decoder | 16,46 | 0,140 | 0,34 (34% vô hình) |
+| modulus + energy, chấm trên ảnh | 16,38 | 0,138 | **3,21** |
+| modulus một mình, chấm trên ảnh | 16,41 | 0,140 | 0,54 |
+| **L1 hệ số + energy, chấm trên ảnh** (recipe hiện tại) | 16,40 | 0,139 | **0,14** |
 
-Chỉ đổi phase 2, nên `configuration_hash` phase 1 không đổi và checkpoint phase 1 cũ
-dùng lại được (`REUSE_PHASE1_FROM` trong Cell 4 của notebook).
+Bịt lỗ hổng mà vẫn giữ modulus + energy thì sọc tăng 9 lần. Chỉ L1 hệ số mới giữ
+được pha, và với nó thì energy không mua được sọc. **Năng lượng cạnh thật ở cả năm
+nhánh đều bằng nhau (0,14× ảnh clean)**: không số hạng mean/moment nào ở đây làm ảnh
+nét thật. Đòn bẩy còn lại là một số hạng biết đánh giá "patch này trông có thật
+không": adversarial (commit `a24a038`) hoặc perceptual. Discriminator bắt được lưới
+chu kỳ 2 px ngay lập tức, nhưng đổi lại PSNR/SSIM giảm.
 
-A/B cục bộ trên CPU (cùng phase 1, 600 update phase 2 mỗi bên, chỉ khác số hạng này;
-48 frame validation, `tools/image_blur_audit.py`):
-
-| kịch bản | hệ số: PSNR · độ mạnh cạnh | modulus: PSNR · độ mạnh cạnh |
-|---|---|---|
-| full (đúng bài toán) | 16,25 · 0,0897 | **16,53 · 0,0933** |
-| chỉ thiếu sáng | 17,29 · 0,2137 | **17,69 · 0,2200** |
-| chỉ blur (ngoài phân phối train) | **20,70** · 0,1770 | 20,47 · **0,1828** |
-
-Modulus thắng cả bốn chỉ số (PSNR, MAE, độ mạnh cạnh, lỗi gradient cạnh) ở hai kịch
-bản đúng phân phối train. Hiệu ứng **có thật nhưng khiêm tốn** ở ngân sách này: độ mạnh
-cạnh tăng 3–4%, còn rất xa ảnh sạch (0,411). Đây là số của một phase 1 chỉ 40 update;
-kết luận cuối phải chờ run Kaggle đầy đủ. Nếu vẫn chưa đủ nét, đòn bẩy mạnh hơn là
-adversarial (commit `a24a038`), đổi lại PSNR giảm.
+Chỉ đổi phase 2, nên `configuration_hash` phase 1 không đổi và checkpoint phase 1
+dùng lại được (`REUSE_PHASE1_FROM` trong Cell 4 của notebook). Báo cáo train
+(`tools/training_report.py`) giờ in năng lượng cạnh/sọc và tự cảnh báo khi sọc > 1,5×.
 
 ## Luồng tổng quát
 

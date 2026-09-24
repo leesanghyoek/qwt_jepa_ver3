@@ -9,7 +9,7 @@ import torch
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
-from .losses import phase2_reconstruction_loss
+from .losses import invisible_detail_fraction, phase2_reconstruction_loss
 from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
@@ -79,19 +79,28 @@ class Phase2Trainer:
             )
             clean_imu = self.system.normalizer.normalize(batch["imu_clean_phys"])
             detail_weight = float(self.phase.get("reconstruction_detail_weight", 0.0))
+            image_transform = self.system.backbone.image_transform
             image_target = imu_target = None
             if detail_weight > 0:
-                backbone = self.system.backbone
                 with torch.no_grad():
-                    image_target, _ = backbone.image_transform.analysis(batch["image_clean"])
-                    imu_target, _ = backbone.imu_transform.analysis(clean_imu)
+                    image_target, _ = image_transform.analysis(batch["image_clean"])
+                    imu_target, _ = self.system.backbone.imu_transform.analysis(clean_imu)
+            # The decoder's 48 channels are 4x redundant; synthesis averages the
+            # trees, so a detail term scored on them can be lowered in the null
+            # space with the image unchanged. Re-analysing the restored image
+            # scores only what reaches the pixels. Absent from configs written
+            # before the key existed, which keep scoring the decoder output.
+            scores_image = self.phase.get("image_detail_source", "decoder_coefficients") == "restored_image"
+            with torch.set_grad_enabled(scores_image):
+                visible_coefficients, _ = image_transform.analysis(restored["image"])
+            image_coefficients = visible_coefficients if scores_image else restored["image_coefficients"]
             loss, parts = phase2_reconstruction_loss(
                 restored["image"],
                 batch["image_clean"],
                 restored["imu_normalized"],
                 clean_imu,
                 beta=self.phase["smooth_l1_beta"],
-                image_coefficients=restored["image_coefficients"],
+                image_coefficients=image_coefficients,
                 image_coefficient_target=image_target,
                 imu_coefficients=restored["imu_coefficients"],
                 imu_coefficient_target=imu_target,
@@ -102,6 +111,9 @@ class Phase2Trainer:
                 # keep meaning what they meant when they were trained.
                 image_detail_loss=str(self.phase.get("image_detail_loss", "coefficient")),
             )
+            with torch.no_grad():
+                parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
+                    restored["image_coefficients"], visible_coefficients)
             loss = self.phase["reconstruction_loss_weight"] * loss
             (loss / expected).backward()
             totals["loss"] += float(loss.detach()) / expected

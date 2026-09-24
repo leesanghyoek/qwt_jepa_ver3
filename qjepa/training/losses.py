@@ -121,6 +121,23 @@ def detail_modulus_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Te
     return F.l1_loss(detail_modulus(predicted), detail_modulus(target))
 
 
+IMAGE_DETAIL_SOURCES = ("decoder_coefficients", "restored_image")
+
+
+def invisible_detail_fraction(coefficients: torch.Tensor, visible: torch.Tensor) -> torch.Tensor:
+    """Share of the detail-band energy in ``coefficients`` the image does not show.
+
+    The QWT keeps four trees and synthesis averages them, so coefficients are 4x
+    redundant: whatever lies in the null space of synthesis leaves the image
+    untouched. ``visible`` is ``analysis(synthesis(coefficients))``, the part that
+    reaches the pixels. Input coefficients sit at ~0; a decoder whose detail terms
+    are scored on its own output can drive this up, lowering those terms without
+    changing the image.
+    """
+    hidden = detail_bands(coefficients - visible, dim=2).square().sum()
+    return hidden / detail_bands(coefficients, dim=2).square().sum().clamp_min(1e-12)
+
+
 def detail_energy_gap(predicted: torch.Tensor, target: torch.Tensor, dim: int) -> torch.Tensor:
     """Lech nang luong duong net, tinh theo tung bang.
 

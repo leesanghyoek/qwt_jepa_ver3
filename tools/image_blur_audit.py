@@ -231,13 +231,17 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
                     batch["image_noisy"].clamp(0, 1),
                     restored.image.clamp(0, 1),
                 )
+                # Bands of what the viewer sees. The decoder's own coefficients are
+                # 4x redundant and can carry energy synthesis discards, which
+                # would read as detail the image does not have.
+                output_coefficients, _ = system.backbone.image_transform.analysis(output_image)
                 zeroed_image = None
                 if scenario == "blur_only":
                     zeroed = system.decode(replace(latent, ZI=torch.zeros_like(latent.ZI)))
                     zeroed_image = zeroed.image.clamp(0, 1)
                 _record(stats, bands, clean, noisy, output_image,
                         clean_coefficients, latent.image_coefficients,
-                        restored.image_coefficients, zeroed_image)
+                        output_coefficients, zeroed_image)
                 if scenario == "blur_only":
                     active = torch.tensor(
                         [any(corruption["image"][key] for key in
@@ -249,7 +253,7 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
                         _record(active_stats, active_bands, clean[active], noisy[active],
                                 output_image[active], clean_coefficients[active],
                                 latent.image_coefficients[active],
-                                restored.image_coefficients[active],
+                                output_coefficients[active],
                                 zeroed_image[active])
                         active_samples += int(active.sum())
                         active_pixels += clean[active].numel()

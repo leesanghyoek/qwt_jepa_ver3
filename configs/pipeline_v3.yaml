@@ -242,5 +242,22 @@ phase2:
   # gan nhu bat bien khi canh dich duoi 1 px, nen toi uu dung o 1,0x va 1,25x.
   # IMU khong doi (Haar khong co quaternion). Trong so van la
   # reconstruction_detail_weight. Config cu khong co khoa nay = coefficient.
-  image_detail_loss: modulus
+  #
+  # DA THU "modulus" (run p5) VA BO: modulus va detail_energy deu KHONG xet pha,
+  # tuc chi hoi "du nang luong chua" ma khong hoi "dung cho chua". Mot he so chi
+  # tiet lech DEU tong hop ra dung soc chu ky 2 px (LH -> ngang, HL -> doc, HH ->
+  # o ban co), va do la nang luong re nhat decoder co the tao. A/B cuc bo, cung
+  # phase 1, 600 update, cham tren anh khoi phuc: modulus + energy -> soc 3,21x
+  # anh clean; modulus mot minh -> 0,54x; coefficient + energy -> 0,14x (khong
+  # soc). Nang luong canh that (chu ky 4-16 px) o CA BON bien the deu 0,14x clean:
+  # khong so hang nao o day lam anh net that.
+  image_detail_loss: coefficient
+  # Cac so hang chi tiet ANH cham diem tren he so nao. "decoder_coefficients" =
+  # 48 kenh decoder xuat ra; nhung QWT du 4 lan va synthesis lay TRUNG BINH 4
+  # cay, nen phan nam trong null space cua synthesis KHONG hien len anh. Do tren
+  # frame that: giu anh y nguyen (lech toi da 1e-7) ma van ha duoc modulus 63%,
+  # L1 he so 41%, energy gap 68%. Run p5 dung cho do: modulus -29% nhung anh van
+  # mo. "restored_image" = phan tich lai CHINH anh khoi phuc, chi cham cai nguoi
+  # xem thay. Config cu khong co khoa nay = decoder_coefficients.
+  image_detail_source: restored_image
   precision: fp32

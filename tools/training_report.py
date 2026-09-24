@@ -50,7 +50,7 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "variance", "covarianc
                 "reconstruction_imu", "reconstruction_imu_detail",
                 "encoder_sensitivity", "gradient_norm")
 PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
-                "image_detail_energy",
+                "image_detail_energy", "image_detail_invisible_fraction",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -250,6 +250,23 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
             findings.append(f"{label}: khôi phục ({restored:.4f}) KHÔNG tốt hơn input "
                             f"({baseline:.4f}) — model đang làm hỏng chỉ số này.")
 
+    # PSNR/SSIM cannot tell real sharpening from a fixed high-frequency pattern.
+    # Both ratios are power relative to the clean frame, so 1.00 = like clean.
+    if isinstance(final.get("validation_image_stripe_power"), (int, float)):
+        print("\n  Độ nét thật và sọc — năng lượng phổ so với ảnh clean (1.00 = như clean)")
+        print(f"  {'':<34}{'input':>12}{'khôi phục':>12}")
+        for key, label in (("image_edge_power", "cạnh/texture (chu kỳ 4-16 px) ↑"),
+                           ("image_stripe_power", "sọc (chu kỳ 2 px) — ~1 là tốt")):
+            print(f"  {label:<34}{fmt(final.get('validation_baseline_' + key), 12, 3)}"
+                  f"{fmt(final.get('validation_' + key), 12, 3)}")
+        stripe = final["validation_image_stripe_power"]
+        if stripe > 1.5:
+            findings.append(
+                f"Năng lượng sọc chu kỳ 2 px = {stripe:.2f}x ảnh clean — ảnh có sọc ngang/dọc/ô "
+                "bàn cờ. Đó là dấu vân tay của một số hạng loss thưởng NĂNG LƯỢNG chi tiết mà "
+                "không xét vị trí (modulus, detail_energy): một hệ số chi tiết lệch đều tổng hợp "
+                "ra đúng sọc chu kỳ 2 px.")
+
     # The variation metric is a rate (diff / 0.01 s), so scaling it back to a
     # per-sample difference makes it comparable with the absolute error. Near 1.0
     # the consecutive errors are uncorrelated -- jitter, not offset -- and no
@@ -299,6 +316,19 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
     return findings
 
 
+def invisible_detail_finding(steps: list[dict]) -> list[str]:
+    # QWT coefficients are 4x redundant and synthesis averages the trees, so a
+    # decoder can park detail energy where the image never shows it. Input
+    # coefficients sit at ~0; any real share means the detail terms, if scored
+    # on the decoder output, are being lowered without the image changing.
+    last = window_median(steps, "image_detail_invisible_fraction", at_start=False)
+    if not isinstance(last, (int, float)) or last < 0.05:
+        return []
+    return [f"{last:.0%} năng lượng chi tiết decoder xuất ra KHÔNG hiện lên ảnh (nằm trong "
+            "null space của synthesis). Nếu phase2.image_detail_source = decoder_coefficients, "
+            "các số hạng chi tiết ảnh đang giảm mà ảnh không nét hơn — dùng restored_image."]
+
+
 def phase_header(name: str, steps: list[dict], checkpoints: list[dict]) -> list[str]:
     findings: list[str] = []
     print(f"\n{'=' * 78}\n{name}\n{'=' * 78}")
@@ -346,6 +376,7 @@ def config_section(run: Path) -> None:
         ("phase2.detail_energy_weight", ("phase2", "detail_energy_weight")),
         ("phase2.imu_variation_weight", ("phase2", "imu_variation_weight")),
         ("phase2.image_detail_loss", ("phase2", "image_detail_loss")),
+        ("phase2.image_detail_source", ("phase2", "image_detail_source")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
         ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]
@@ -413,6 +444,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
     findings += phase_header("PHASE 2 — khôi phục", phase2_steps, phase2_checks)
     if phase2_steps:
         term_table(phase2_steps, PHASE2_TERMS, "Thành phần loss (trung vị 5% đầu và 5% cuối)")
+        findings += invisible_detail_finding(phase2_steps)
     if phase2_checks:
         findings += validation_section(phase2_checks, args.max_rows)
 
