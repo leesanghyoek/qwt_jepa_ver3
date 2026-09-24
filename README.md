@@ -155,22 +155,33 @@ flowchart LR
     CL["Ảnh + IMU<br/><b>SẠCH</b>"]
     CAM["<b>Camera</b><br/>mờ · tối · nhiễu hạt<br/>JPEG"]
     ENV["<b>Môi trường</b><br/>nhiễu trắng · bias<br/>rung · spike"]
-    NZ["Ảnh + IMU<br/><b>NHIỄU</b>"]
+    XB["<b>Ảnh MỜ</b><br/>3 × 256 × 256"]
+    UN["<b>IMU NHIỄU</b><br/>6 × 128"]
     BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
-    Z["<b>②</b> ZI · ZU"]
+    Z["<b>②</b> latent JEPA<br/>ZI · ZU"]
     L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
-    D["<b>③ Phase 2</b><br/>ResNet trên pixel<br/>ảnh mờ + ZI"]
-    R["Ảnh + IMU<br/>phục hồi"]
-    CL -- ảnh --> CAM --> NZ
-    CL -- IMU --> ENV --> NZ
-    NZ --> BB --> Z
-    Z --> L1
-    Z --> D --> R
+    RN["<b>③ ResNet</b> · phase 2<br/>ảnh mờ + ZI → Δ"]
+    DU["decoder IMU<br/>phase 2"]
+    RI["<b>Ảnh phục hồi</b><br/>= ảnh mờ + Δ"]
+    RU["<b>IMU phục hồi</b>"]
+    CL -- ảnh --> CAM --> XB
+    CL -- IMU --> ENV --> UN
+    XB --> BB
+    UN --> BB
+    BB --> Z --> L1
+    Z -- ZI --> RN
+    XB == "skip: ảnh mờ 256×256" ==> RN
+    RN --> RI
+    Z -- ZU --> DU --> RU
     CL -. "teacher EMA · đích của neo" .-> L1
     classDef d fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
+    classDef c fill:#fff8e1,stroke:#f9a825,color:#1a1a1a
     classDef l fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
-    class CAM,ENV d
+    classDef r fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px,color:#1a1a1a
+    class CAM,ENV c
     class Z l
+    class RN r
+    class DU d
 ```
 
 Hai nguồn hỏng **độc lập**: ảnh mờ, tối và nhiễu hạt do **camera** (defocus, blur
@@ -188,8 +199,11 @@ của lần train đầu tiên. Vẫn không có đường pixel-space trong pha
 (`reconstruction_loss_weight: 0.0`).
 
 Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi
-tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó: ResNet trên pixel cho
-ảnh, decoder hệ số Haar cho IMU.
+tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó. Ảnh được khôi phục bằng
+**ResNet** ③: mũi tên đậm là skip đưa chính ảnh mờ 256×256 vào ResNet (cho biết
+đường nét nằm ở đâu), còn `ZI` là đặc trưng JEPA học ở phase 1 (cho biết ảnh sạch
+nên trông thế nào). ResNet xuất phần hiệu chỉnh `Δ` cộng vào ảnh mờ. IMU dùng decoder
+hệ số Haar. Chi tiết từng lớp ở sơ đồ 3 bên dưới.
 
 ## Kiến trúc chi tiết
 
@@ -198,7 +212,7 @@ Mọi shape và số tham số dưới đây được **in ra từ chính model*
 
 ### Sơ đồ kiến trúc
 
-Ba sơ đồ thay vì một, vì GitHub co sơ đồ mermaid cho vừa bề ngang trang: một sơ
+Bốn sơ đồ thay vì một, vì GitHub co sơ đồ mermaid cho vừa bề ngang trang: một sơ
 đồ to sẽ bị thu nhỏ đến mức không đọc nổi chữ. Tách ra thì mỗi sơ đồ hiện ở cỡ
 thật.
 
@@ -277,61 +291,86 @@ tối thiểu hoá gain đó, tức phạt co đẳng hướng — bảo encoder
 thứ*, kéo thẳng về collapse. Tỉ số hai gain thì **không thứ nguyên**: collapse
 đưa cả hai về 0 và tỉ số đứng yên, nên nó nâng trọng số lên được thật.
 
-#### 3. Phase 2 — khôi phục, backbone đóng băng
+#### 3. Phase 2 — ResNet khôi phục ảnh, backbone đóng băng
 
 ```mermaid
 flowchart TB
-    ZI["<b>ZI</b> · 128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
-    ZU["<b>ZU</b> · 128 × 8<br/>backbone ĐÓNG BĂNG"]
     CI["<b>Ci</b> · hệ số QWT của ảnh mờ<br/>48 × 128 × 128"]
     SB["QWT synthesis<br/>tái tạo hoàn hảo"]
     IB["<b>Ảnh mờ</b> · 3 × 256 × 256"]
-    RH["head conv 3×3 · 32 × 256 × 256"]
-    RD["conv 4×4 stride 2 · 64 × 128 × 128"]
-    RL["conv 1×1 + upsample<br/>→ 64 × 128 × 128"]
-    RF["nối + conv 3×3 · 64 × 128 × 128"]
-    RT["<b>8 khối residual</b><br/>conv–ReLU–conv + identity<br/>64 × 128 × 128"]
-    RU["conv + pixel shuffle ×2<br/>32 × 256 × 256"]
-    RS["nối với head · conv 3×3<br/>conv 3×3 <b>zero-init</b><br/>Δ = 3 × 256 × 256"]
+    ZI["<b>ZI</b> · latent JEPA<br/>128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
+    subgraph RES["<b>ResNet khôi phục ảnh</b> · 0,80 M tham số"]
+        direction TB
+        RH["<b>head</b> conv 3×3<br/>32 × 256 × 256"]
+        RD["<b>down</b> conv 4×4 stride 2<br/>64 × 128 × 128"]
+        RL["<b>latent</b> conv 1×1 + upsample<br/>64 × 128 × 128"]
+        RF["<b>fuse</b> nối + conv 3×3<br/>64 × 128 × 128"]
+        RT["<b>8 khối residual</b><br/>conv–ReLU–conv + identity<br/>64 × 128 × 128"]
+        RU["<b>up</b> conv + pixel shuffle ×2<br/>32 × 256 × 256"]
+        RS["<b>tail</b> nối với head<br/>conv 3×3 → conv 3×3 <b>zero-init</b><br/>Δ = 3 × 256 × 256"]
+        RH --> RD --> RF
+        RL --> RF
+        RF --> RT --> RU --> RS
+        RH -. "skip U-Net" .-> RS
+    end
     PI(("＋"))
-    OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
+    OI["<b>Ảnh phục hồi</b> = ảnh mờ + Δ<br/>3 × 256 × 256"]
     AI["QWT analysis<br/>loss chi tiết chấm trên ảnh"]
-    DU["<b>Decoder IMU</b> · 0,36 M · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
-    HU["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Cu<br/>Δu = 12 × 64"]
-    CU["<b>Cu</b> · hệ số của chính IMU nhiễu<br/>12 × 64"]
-    PU(("＋"))
-    SU["Haar synthesis"]
-    OU["<b>IMU phục hồi</b><br/>6 × 128"]
-    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ L1 hệ số chi tiết LH/HL/HH trên ảnh · 2,0<br/>+ sai phân bậc một IMU<br/>+ khớp năng lượng đường nét · 1,0"])
-    SK["<b>3 tầng encoder IMU</b> · skip"]
-    GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)"}}
-    CI --> SB --> IB --> RH --> RD --> RF
-    ZI --> RL --> RF --> RT --> RU --> RS --> PI --> OI --> AI --> L1
-    RH -. "skip U-Net" .-> RS
-    IB -. "không qua trọng số nào" .-> PI
-    ZU --> DU --> HU --> PU --> SU --> OU --> L1
-    SK --> GT --> DU
-    CU -.-> PU
-    CU --> HU
+    L1(["<b>Loss ảnh</b><br/>L1 pixel<br/>+ L1 hệ số chi tiết LH/HL/HH · 2,0<br/>+ khớp năng lượng đường nét · 1,0"])
+    CI --> SB --> IB --> RH
+    ZI --> RL
+    RS --> PI --> OI --> AI --> L1
+    IB == "không qua trọng số nào" ==> PI
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
     classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
-    class ZI,ZU lat
-    class CI,CU,SB,SU,AI,IB tf
-    class RH,RD,RL,RF,RT,RU,RS,PI,OI,DU,HU,PU,OU p2
-    class GT p2
+    class ZI lat
+    class CI,SB,IB,AI tf
+    class RH,RD,RL,RF,RT,RU,RS,PI,OI p2
     class L1 loss
+    style RES fill:#f1f8e9,stroke:#2e7d32,stroke-width:3px
 ```
 
-Nhánh ảnh là ResNet trên pixel: **ảnh mờ cho vị trí đường nét, latent cho biết cảnh
-sạch nên trông thế nào**. Latent được upsample từ 16×16 lên 128×128 rồi trộn vào thân
-ResNet; tần số cao đi qua đường pixel và skip U-Net ở 256×256, nên upsample latent
-bằng bilinear không làm mất chi tiết. Nhánh IMU giữ decoder hệ số, với `SkipMerge`
-có cổng: skip cấp độ phân giải, latent quyết định giữ cái gì.
+Ảnh mờ cho biết **đường nét nằm ở đâu** (đi vào `head` ở 256×256 và vòng qua skip
+U-Net tới `tail`); `ZI` cho biết **ảnh sạch nên trông thế nào** (trộn vào thân ở
+128×128). Conv cuối zero-init nên trước khi học, `Δ = 0` và ảnh phục hồi đúng bằng
+ảnh mờ. Mũi tên đậm là đường **không đi qua trọng số nào**: ảnh mờ cộng thẳng vào
+đầu ra.
 
-Hai mũi tên nét đứt tới dấu cộng là hai đường **không đi qua trọng số nào**: ảnh mờ
-và hệ số của IMU nhiễu cộng thẳng vào đầu ra. Đó là sàn identity — xem
+#### 4. Phase 2 — decoder IMU, backbone đóng băng
+
+```mermaid
+flowchart TB
+    ZU["<b>ZU</b> · 128 × 8<br/>backbone ĐÓNG BĂNG"]
+    SK["<b>3 tầng encoder IMU</b> · skip"]
+    GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)"}}
+    DU["<b>Decoder IMU</b> · 0,36 M · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
+    HU["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Cu<br/>Δu = 12 × 64"]
+    CU["<b>Cu</b> · hệ số Haar của IMU nhiễu<br/>12 × 64"]
+    PU(("＋"))
+    SU["Haar synthesis"]
+    OU["<b>IMU phục hồi</b><br/>6 × 128"]
+    LU(["<b>Loss IMU</b><br/>SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết Haar<br/>+ sai phân bậc một"])
+    ZU --> DU --> HU --> PU --> SU --> OU --> LU
+    SK --> GT --> DU
+    CU --> HU
+    CU == "không qua trọng số nào" ==> PU
+    classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
+    classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
+    classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
+    classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
+    class ZU lat
+    class CU,SU,SK tf
+    class GT,DU,HU,PU,OU p2
+    class LU loss
+```
+
+Nhánh IMU giữ decoder hệ số, với `SkipMerge` có cổng: skip cấp độ phân giải, latent
+quyết định giữ cái gì. Cổng sinh từ đường latent nên thay đổi theo từng vị trí và
+từng kênh.
+
+Ở cả hai sơ đồ phase 2, mũi tên đậm tới dấu cộng là sàn identity — xem
 [Hai quyết định thiết kế quan trọng](#hai-quyết-định-thiết-kế-quan-trọng).
 
 > **Muốn phóng to?** Copy khối mermaid rồi dán vào <https://mermaid.live> để kéo
