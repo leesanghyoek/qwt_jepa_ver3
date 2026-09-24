@@ -260,4 +260,15 @@ phase2:
   # mo. "restored_image" = phan tich lai CHINH anh khoi phuc, chi cham cai nguoi
   # xem thay. Config cu khong co khoa nay = decoder_coefficients.
   image_detail_source: restored_image
+  # Decoder ANH. "qwt_coefficients" = decoder cu: tu latent 16x16 dung len 48 kenh
+  # he so QWT roi synthesis. "resnet_pixel" = ResNet tren PIXEL: doc chinh anh mo
+  # o do phan giai day du (skip) cong latent JEPA upsample, xuat phan residual cong
+  # vao anh mo. A/B cuc bo cung phase 1, cung loss, 600 update: noi dung duong net
+  # cua anh clean duoc tai tao DUNG CHO (chu ky 4-16 px) 0,309 -> 0,359, sai so dai
+  # canh 0,520 -> 0,465. Ba bien the decoder he so truoc do deu dung o cung mot san,
+  # nen gioi han nam o kieu decoder chu khong o latent. IMU giu decoder he so.
+  # Config cu khong co khoa nay = qwt_coefficients.
+  image_decoder: resnet_pixel
+  image_resnet_width: 64    # kenh cua than ResNet (o 128x128)
+  image_resnet_blocks: 8    # so khoi residual
   precision: fp32

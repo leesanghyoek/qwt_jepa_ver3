@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .blocks import Stage, Upsample, initialize_trainable, resize
+
+IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel")
 
 
 class SkipMerge(nn.Module):
@@ -153,8 +156,65 @@ class LatentCoefficientDecoder(nn.Module):
         return base + predicted
 
 
+class _ResidualBlock(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.first = nn.Conv2d(width, width, 3, padding=1)
+        self.second = nn.Conv2d(width, width, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.second(F.relu(self.first(x)))
+
+
+class PixelResNetDecoder(nn.Module):
+    """Restore the image in PIXELS: blurry input + JEPA latent -> residual.
+
+    The coefficient decoder reaches the image only through 48 QWT channels built
+    up from a 16x16 latent, and three variants of it (latent only, no skips,
+    full-resolution skips) all stopped at the same detail floor. This one works
+    on the blurry image itself at full resolution: a head at 256x256, a residual
+    trunk at 128x128 into which the upsampled latent is fused, pixel-shuffle
+    back to 256x256, a U-Net skip from the head, and a residual added to the
+    BLURRY INPUT. The latent says what the clean scene should be; the pixels say
+    where its edges are.
+
+    Local A/B, same phase 1 and loss, 600 updates: clean edge content reproduced
+    in place (4-16 px periods) 0.309 with the coefficient decoder, 0.359 with
+    this one; edge-band error 0.520 -> 0.465.
+
+    The last conv is zero-initialised, so update 0 returns the input exactly --
+    the same identity floor as the coefficient residual.
+    """
+
+    def __init__(self, latent_channels: int = 128, width: int = 64, blocks: int = 8) -> None:
+        super().__init__()
+        self.head = nn.Sequential(nn.Conv2d(3, 32, 3, padding=1), nn.ReLU())
+        self.down = nn.Sequential(nn.Conv2d(32, width, 4, stride=2, padding=1), nn.ReLU())
+        self.latent = nn.Conv2d(latent_channels, width, 1)
+        self.fuse = nn.Conv2d(2 * width, width, 3, padding=1)
+        self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
+        self.up = nn.Sequential(nn.Conv2d(width, 32 * 4, 3, padding=1), nn.PixelShuffle(2), nn.ReLU())
+        self.tail = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(), nn.Conv2d(32, 3, 3, padding=1))
+        nn.init.zeros_(self.tail[-1].weight)
+        nn.init.zeros_(self.tail[-1].bias)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        if image.shape[-2] % 2 or image.shape[-1] % 2:
+            raise ValueError(f"Pixel decoder needs even image sides, got {tuple(image.shape[-2:])}")
+        head = self.head(image)
+        x = self.down(head)
+        z = F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
+        x = self.trunk(self.fuse(torch.cat((x, z), dim=1)))
+        return image + self.tail(torch.cat((self.up(x), head), dim=1))
+
+
 class LatentDecoders(nn.Module):
-    """Decode ZI/ZU into wavelet coefficients, optionally with input paths."""
+    """Decode ZI/ZU into wavelet coefficients, optionally with input paths.
+
+    With ``image_decoder="resnet_pixel"`` the image branch is a PixelResNetDecoder
+    and produces pixels, not coefficients; RestorationSystem.decode drives it. The
+    IMU branch is the coefficient decoder either way.
+    """
 
     def __init__(
         self,
@@ -166,15 +226,24 @@ class LatentDecoders(nn.Module):
         skip_channels: tuple[int, ...] | None = None,
         skip_gating: bool = True,
         sees_input: bool = True,
+        image_decoder: str = "qwt_coefficients",
+        resnet_width: int = 64,
+        resnet_blocks: int = 8,
     ) -> None:
         super().__init__()
+        if image_decoder not in IMAGE_DECODERS:
+            raise ValueError(f"image_decoder must be one of {IMAGE_DECODERS}")
         self.residual = residual
         self.uses_skips = skip_channels is not None
-        self.image = LatentCoefficientDecoder(
-            48, image_coefficient_size, channels, dim=2, groups=groups,
-            residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
-            sees_input=sees_input,
-        )
+        self.image_decoder = image_decoder
+        if image_decoder == "resnet_pixel":
+            self.image = PixelResNetDecoder(channels[3], resnet_width, resnet_blocks)
+        else:
+            self.image = LatentCoefficientDecoder(
+                48, image_coefficient_size, channels, dim=2, groups=groups,
+                residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
+                sees_input=sees_input,
+            )
         self.imu = LatentCoefficientDecoder(
             12, (imu_coefficient_length,), channels, dim=1, groups=groups,
             residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
@@ -190,6 +259,8 @@ class LatentDecoders(nn.Module):
         image_skips: tuple[torch.Tensor, ...] | None = None,
         imu_skips: tuple[torch.Tensor, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.image_decoder != "qwt_coefficients":
+            raise ValueError("The pixel image decoder is driven by RestorationSystem.decode")
         return (
             self.image(ZI, image_base, image_skips),
             self.imu(ZU, imu_base, imu_skips),

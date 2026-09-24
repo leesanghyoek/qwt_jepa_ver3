@@ -156,6 +156,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.image_detail_loss must be coefficient or modulus")
     if phase2.get("image_detail_source", "decoder_coefficients") not in ("decoder_coefficients", "restored_image"):
         raise ValueError("phase2.image_detail_source must be decoder_coefficients or restored_image")
+    image_decoder = phase2.get("image_decoder", "qwt_coefficients")
+    if image_decoder not in ("qwt_coefficients", "resnet_pixel"):
+        raise ValueError("phase2.image_decoder must be qwt_coefficients or resnet_pixel")
+    if image_decoder == "resnet_pixel":
+        # Explicit, like skip_gating: the hash must record the trained width/depth.
+        for key in ("image_resnet_width", "image_resnet_blocks"):
+            value = phase2.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"phase2.image_decoder resnet_pixel needs a positive integer phase2.{key}")
+        if data["image_size"][0] % 2 or data["image_size"][1] % 2:
+            raise ValueError("phase2.image_decoder resnet_pixel needs even image sides")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
     scenarios = phase2.get("train_scenarios")
@@ -241,15 +252,23 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         # Neo phase 1 khong bao gio nhan skip: neu no co duong vong tu encoder thi
         # no thoa man duoc neo ma khong ep gi vao latent — dung cai ma neo sinh ra
         # de ngan. Cung ly do voi viec no giu he so tuyet doi thay vi residual.
-        decoders=build_decoders(config, residual=False, skips=False) if enabled else None,
+        # The phase-1 anchor predicts clean COEFFICIENTS from the latent alone;
+        # phase2.image_decoder must never reach it, or the phase-1 model changes.
+        decoders=build_decoders(config, residual=False, skips=False,
+                                image_decoder="qwt_coefficients") if enabled else None,
     )
 
 
 def build_decoders(
-    config: dict[str, Any], *, residual: bool | None = None, skips: bool | None = None
+    config: dict[str, Any], *, residual: bool | None = None, skips: bool | None = None,
+    image_decoder: str | None = None,
 ) -> LatentDecoders:
     image_size = config["data"]["image_size"]
     channels = tuple(config["model"]["encoder_channels"])
+    if image_decoder is None:
+        # Absent from checkpoints trained before the key existed: those used the
+        # coefficient decoder, and that is what their weights rebuild into.
+        image_decoder = config["phase2"].get("image_decoder", "qwt_coefficients")
     if residual is None:
         residual = bool(config["phase2"].get("input_coefficient_residual", False))
     if skips is None:
@@ -269,6 +288,9 @@ def build_decoders(
         # nen khong co duong nao doi kien truc am tham.
         skip_gating=bool(config["phase2"].get("skip_gating", False)) if skips else True,
         sees_input=bool(config["phase2"].get("residual_sees_input", False)) if residual else False,
+        image_decoder=image_decoder,
+        resnet_width=int(config["phase2"].get("image_resnet_width", 64)),
+        resnet_blocks=int(config["phase2"].get("image_resnet_blocks", 8)),
     )
 
 

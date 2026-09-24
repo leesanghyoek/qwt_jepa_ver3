@@ -96,7 +96,8 @@ def test_old_checkpoint_config_without_the_new_keys_rebuilds_the_old_architectur
     cu deu nap that bai bang KeyError thay vi mot thong bao ro rang.
     """
     config = copy.deepcopy(load_config("configs/pipeline_v3.yaml"))
-    for key in ("residual_sees_input", "skip_gating", "encoder_skips"):
+    for key in ("residual_sees_input", "skip_gating", "encoder_skips",
+                "image_decoder", "image_resnet_width", "image_resnet_blocks"):
         config["phase2"].pop(key, None)
     config["phase2"]["decoder_input"] = "fused_dense_latent_only"
     decoders = build_decoders(config)

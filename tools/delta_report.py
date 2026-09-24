@@ -168,7 +168,8 @@ def _ablate(system, loader, device, batches: int) -> None:
     Khi do anh van net — nhung net vi no copy dau vao, khong phai vi khoi phuc, va
     luan diem latent-first mat sach. Day la phep do duy nhat tach duoc hai truong hop.
     """
-    if not system.decoders.uses_skips:
+    # The pixel ResNet always has a path around the latent: the blurry image.
+    if not system.decoders.uses_skips and system.decoders.image_decoder != "resnet_pixel":
         print("\n(--ablate-latent: decoder khong dung skip, phep do nay khong co y nghia)")
         return
     full = zeroed = count = 0.0
@@ -192,7 +193,7 @@ def _ablate(system, loader, device, batches: int) -> None:
     print(f"  MAE khi ZI/ZU = 0   : {zeroed:.5f}")
     print(f"  latent dong gop     : {share:.1f}% sai so")
     if share < 5:
-        print("  -> Decoder gan nhu BO MAC latent: net den tu skip, khong phai khoi phuc.")
+        print("  -> Decoder gan nhu BO MAC latent: net den tu skip/anh mo, khong phai tu JEPA.")
     elif share < 20:
         print("  -> Latent co dong gop nhung skip dang gan het viec.")
     else:

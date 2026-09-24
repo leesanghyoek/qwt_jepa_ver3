@@ -377,6 +377,7 @@ def config_section(run: Path) -> None:
         ("phase2.imu_variation_weight", ("phase2", "imu_variation_weight")),
         ("phase2.image_detail_loss", ("phase2", "image_detail_loss")),
         ("phase2.image_detail_source", ("phase2", "image_detail_source")),
+        ("phase2.image_decoder", ("phase2", "image_decoder")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
         ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]

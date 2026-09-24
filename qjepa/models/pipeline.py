@@ -124,11 +124,22 @@ class RestorationSystem(nn.Module):
             )
 
     def decode(self, latent: LatentBatch) -> RestoredBatch:
-        image_coeff, imu_coeff = self.decoders(
-            latent.ZI, latent.ZU, latent.image_coefficients, latent.imu_coefficients,
-            latent.image_skips, latent.imu_skips,
-        )
-        image = self.backbone.image_transform.synthesis(image_coeff, latent.image_layout)
+        transform = self.backbone.image_transform
+        if self.decoders.image_decoder == "resnet_pixel":
+            # The QWT reconstructs perfectly, so this IS the blurry input image;
+            # decode(latent) keeps its signature for the ZI-ablation tools.
+            blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
+            image = self.decoders.image(latent.ZI, blurry)
+            # Coefficients OF the image, so nothing downstream can score energy
+            # that synthesis would throw away.
+            image_coeff, _ = transform.analysis(image)
+            imu_coeff = self.decoders.imu(latent.ZU, latent.imu_coefficients, latent.imu_skips)
+        else:
+            image_coeff, imu_coeff = self.decoders(
+                latent.ZI, latent.ZU, latent.image_coefficients, latent.imu_coefficients,
+                latent.image_skips, latent.imu_skips,
+            )
+            image = transform.synthesis(image_coeff, latent.image_layout)
         imu_norm = self.backbone.imu_transform.synthesis(imu_coeff, latent.imu_layout)
         return RestoredBatch(
             image=image,

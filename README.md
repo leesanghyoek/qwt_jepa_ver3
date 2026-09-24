@@ -35,7 +35,7 @@ vấn đề chọn wavelet: hai cây dùng *cùng* một filter lệch số nguy
 
 ## Thay đổi lần này — và những gì nó làm mất hiệu lực
 
-Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳng định.
+Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng định.
 
 | | Trước | Sau | Đo bằng |
 |---|---|---|---|
@@ -43,6 +43,7 @@ Ba thay đổi, mỗi cái đều kèm phép đo chứ không phải lời khẳ
 | **Blur ảnh** | bốc ngẫu nhiên, độc lập với IMU | **giữ nguyên** (quyết định 23/09), nhưng đường nối IMU đã dựng xong và bật được bằng `motion_from_imu: true` | `tests/test_imu_motion_blur.py` |
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
 | **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
+| **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **ResNet trên pixel**: ảnh mờ ở độ phân giải đầy đủ (skip) + latent JEPA → phần residual cộng vào ảnh mờ (`image_decoder: resnet_pixel`); tái tạo đúng chỗ nhiều đường nét hơn (0,309 → 0,359) | `tests/test_resnet_decoder.py` |
 
 **Phải train lại phase 1.** Biểu diễn đầu vào đã đổi (bộ lọc wavelet khác) và
 phân phối blur đã đổi, nên checkpoint phase 1 cũ không còn so sánh được. Đây là
@@ -98,14 +99,55 @@ trên ảnh khôi phục (`validation_image_*_power`, 1,00 = như ảnh clean):
 
 Bịt lỗ hổng mà vẫn giữ modulus + energy thì sọc tăng 9 lần. Chỉ L1 hệ số mới giữ
 được pha, và với nó thì energy không mua được sọc. **Năng lượng cạnh thật ở cả năm
-nhánh đều bằng nhau (0,14× ảnh clean)**: không số hạng mean/moment nào ở đây làm ảnh
-nét thật. Đòn bẩy còn lại là một số hạng biết đánh giá "patch này trông có thật
-không": adversarial (commit `a24a038`) hoặc perceptual. Discriminator bắt được lưới
-chu kỳ 2 px ngay lập tức, nhưng đổi lại PSNR/SSIM giảm.
+nhánh đều bằng nhau (0,14× ảnh clean)**: với decoder hệ số, không số hạng mean/moment
+nào ở đây làm ảnh nét thật. Thứ tiếp theo đo được là **kiến trúc decoder** — xem
+[Decoder ảnh ResNet](#decoder-ảnh-resnet-p7).
 
 Chỉ đổi phase 2, nên `configuration_hash` phase 1 không đổi và checkpoint phase 1
 dùng lại được (`REUSE_PHASE1_FROM` trong Cell 4 của notebook). Báo cáo train
 (`tools/training_report.py`) giờ in năng lượng cạnh/sọc và tự cảnh báo khi sọc > 1,5×.
+
+## Decoder ảnh ResNet (p7)
+
+Ý tưởng: QWT + Jacobian đưa ảnh về miền đường nét, JEPA học ảnh mờ và ảnh nét tương
+ứng với nhau ra sao (student đọc ảnh mờ, teacher EMA đọc ảnh sạch), rồi một **ResNet
+có skip từ ảnh mờ** kết hợp ảnh mờ với đặc trưng JEPA để dựng lại ảnh nét. Decoder cũ
+chỉ nhìn ảnh qua latent 16×16 (mỗi ô là một khối 16×16 pixel) và 48 kênh hệ số; ResNet
+đọc **thẳng ảnh mờ ở 256×256**, còn latent cho biết cảnh sạch nên trông thế nào.
+
+A/B cục bộ: cùng phase 1, cùng loss (L1 pixel + L1 hệ số chi tiết chấm trên ảnh ·
+2,0 + energy · 1,0), 600 update, cùng 32 frame valid (kịch bản full):
+
+| decoder ảnh | PSNR | SSIM | đường nét **đúng chỗ** (chu kỳ 4–16 px) | sai số dải đó | sọc 2 px |
+|---|---|---|---|---|---|
+| input (không làm gì) | 11,13 | 0,501 | 0,285 | 0,546 | 0,17 |
+| hệ số QWT (cũ) | **16,40** | 0,558 | 0,309 | 0,520 | 0,14 |
+| **ResNet + latent JEPA** | 16,04 | **0,572** | **0,359** | **0,465** | 0,17 |
+| ResNet, bỏ latent | 14,91 | 0,577 | 0,402 | 0,429 | 0,17 |
+
+"Đúng chỗ" là phần nội dung đường nét của ảnh sạch được tái tạo **đúng pha**
+(`Re Σ F_out·F̄_clean / Σ |F_clean|²` trên dải 4–16 px, 1 = hoàn hảo). Chỉ đo năng
+lượng thì không đủ: nhiễu và sọc cũng làm năng lượng tăng. Ở đây năng lượng tăng
+**và** sai số dải giảm, nên phần tăng thêm là đường nét thật.
+
+Đọc bảng cho đúng:
+
+- ResNet hơn decoder hệ số dù **ít tham số hơn** (0,80 M so với 1,58 M). Ba decoder hệ
+  số trước đó dừng ở cùng một sàn vì cả ba đều chỉ chạm tới ảnh qua hệ số dựng từ
+  latent 16×16; giới hạn nằm ở kiểu decoder.
+- PSNR của ResNet thấp hơn 0,36 dB nhưng SSIM cao hơn: nó giữ cấu trúc tốt hơn, còn
+  sai số độ sáng/màu còn hơi lớn ở ngân sách 600 update.
+- **Bỏ latent** cho nhiều đường nét hơn nhưng PSNR tụt 1,1 dB. Phase 1 ở đây chỉ train
+  **40 update**, latent gần như chưa học gì, nên phép thử này **chưa trả lời được**
+  JEPA có giúp phần đường nét hay không. Run Kaggle với phase 1 đầy đủ 5000 update mới
+  trả lời được; `delta_report.py --ablate-latent` đo trên checkpoint thật.
+- Mỗi nhánh chạy một lần, 600 update, 32 frame: chiều hướng rõ, chênh lệch nhỏ giữa
+  hai nhánh ResNet có thể là nhiễu.
+
+QWT và Jacobian vẫn ở đúng vai trò: QWT Hilbert là miền đầu vào của encoder và là
+miền chấm loss chi tiết (trên ảnh khôi phục); Jacobian (tỉ số độ nhạy) ép encoder ở
+phase 1 phản ứng với đường nét chứ không với nhiễu. Chỉ đổi phase 2, nên phase 1
+dùng lại được.
 
 ## Luồng tổng quát
 
@@ -118,7 +160,7 @@ flowchart LR
     BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
     Z["<b>②</b> ZI · ZU"]
     L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
-    D["<b>③ Phase 2</b><br/>decoder mới<br/>+ hệ số input nhiễu"]
+    D["<b>③ Phase 2</b><br/>ResNet trên pixel<br/>ảnh mờ + ZI"]
     R["Ảnh + IMU<br/>phục hồi"]
     CL --> GY --> KER --> NZ --> BB --> Z
     CL --> NZ
@@ -144,7 +186,8 @@ của lần train đầu tiên. Vẫn không có đường pixel-space trong pha
 (`reconstruction_loss_weight: 0.0`).
 
 Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi
-tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó.
+tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó: ResNet trên pixel cho
+ảnh, decoder hệ số Haar cho IMU.
 
 ## Kiến trúc chi tiết
 
@@ -238,49 +281,55 @@ thứ*, kéo thẳng về collapse. Tỉ số hai gain thì **không thứ nguy�
 flowchart TB
     ZI["<b>ZI</b> · 128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
     ZU["<b>ZU</b> · 128 × 8<br/>backbone ĐÓNG BĂNG"]
-    DI["<b>Decoder ảnh</b> · 1,53 M · sub-pixel conv<br/>128×16×16 → 128×32×32 → 96×32×32<br/>→ 96×64×64 → 64×64×64<br/>→ 64×128×128 → 32×128×128"]
-    DU["<b>Decoder IMU</b> · 0,33 M · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
-    HI["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Ci<br/>Δi = 48 × 128 × 128"]
-    HU["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Cu<br/>Δu = 12 × 64"]
-    CI["<b>Ci</b> · hệ số của chính ảnh mờ<br/>48 × 128 × 128"]
-    CU["<b>Cu</b> · hệ số của chính IMU nhiễu<br/>12 × 64"]
+    CI["<b>Ci</b> · hệ số QWT của ảnh mờ<br/>48 × 128 × 128"]
+    SB["QWT synthesis<br/>tái tạo hoàn hảo"]
+    IB["<b>Ảnh mờ</b> · 3 × 256 × 256"]
+    RH["head conv 3×3 · 32 × 256 × 256"]
+    RD["conv 4×4 stride 2 · 64 × 128 × 128"]
+    RL["conv 1×1 + upsample<br/>→ 64 × 128 × 128"]
+    RF["nối + conv 3×3 · 64 × 128 × 128"]
+    RT["<b>8 khối residual</b><br/>conv–ReLU–conv + identity<br/>64 × 128 × 128"]
+    RU["conv + pixel shuffle ×2<br/>32 × 256 × 256"]
+    RS["nối với head · conv 3×3<br/>conv 3×3 <b>zero-init</b><br/>Δ = 3 × 256 × 256"]
     PI(("＋"))
-    PU(("＋"))
-    SI["QWT synthesis"]
-    SU["Haar synthesis"]
     OI["<b>Ảnh phục hồi</b><br/>3 × 256 × 256"]
+    AI["QWT analysis<br/>loss chi tiết chấm trên ảnh"]
+    DU["<b>Decoder IMU</b> · 0,36 M · sub-pixel conv<br/>128×8 → 128×16 → 96×16<br/>→ 96×32 → 64×32 → 64×64 → 32×64"]
+    HU["head conv 3×3 · <b>zero-init</b><br/>đọc cả x và Cu<br/>Δu = 12 × 64"]
+    CU["<b>Cu</b> · hệ số của chính IMU nhiễu<br/>12 × 64"]
+    PU(("＋"))
+    SU["Haar synthesis"]
     OU["<b>IMU phục hồi</b><br/>6 × 128"]
-    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ băng chi tiết LH/HL/HH · 2,0<br/>+ sai phân bậc một IMU · 0,5<br/>+ khớp năng lượng đường nét · 1,0"])
-    SK["<b>3 tầng encoder</b> · skip<br/>96×32×32 · 64×64×64 · 32×128×128<br/>đường nét của ảnh NHIỄU: sắc nhưng chưa đáng tin"]
-    GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)<br/>bias −2 ⇒ ban đầu gần như đóng"}}
-    ZI --> DI --> HI --> PI --> SI --> OI --> L1
+    L1(["<b>Loss phase 2</b><br/>L1 pixel + SmoothL1 accel/gyro β=0,05<br/>+ L1 hệ số chi tiết LH/HL/HH trên ảnh · 2,0<br/>+ sai phân bậc một IMU<br/>+ khớp năng lượng đường nét · 1,0"])
+    SK["<b>3 tầng encoder IMU</b> · skip"]
+    GT{{"<b>SkipMerge có cổng</b><br/>cổng = sigmoid(conv(đường latent))<br/>x + cổng × conv(skip)"}}
+    CI --> SB --> IB --> RH --> RD --> RF
+    ZI --> RL --> RF --> RT --> RU --> RS --> PI --> OI --> AI --> L1
+    RH -. "skip U-Net" .-> RS
+    IB -. "không qua trọng số nào" .-> PI
     ZU --> DU --> HU --> PU --> SU --> OU --> L1
-    SK --> GT
-    GT --> DI
-    GT --> DU
-    CI -. "không qua trọng số nào" .-> PI
+    SK --> GT --> DU
     CU -.-> PU
-    CI --> HI
     CU --> HU
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
     classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
     class ZI,ZU lat
-    class CI,CU,SI,SU tf
-    class DI,DU,HI,HU,PI,PU,OI,OU p2
-    class SK bb
+    class CI,CU,SB,SU,AI,IB tf
+    class RH,RD,RL,RF,RT,RU,RS,PI,OI,DU,HU,PU,OU p2
     class GT p2
     class L1 loss
 ```
 
-Khối `SkipMerge` là chỗ phân công: **skip cấp độ phân giải, latent quyết định giữ
-cái gì**. Cổng được sinh từ đường latent nên nó thay đổi theo từng vị trí và từng
-kênh — decoder học cách dùng latent để *lọc* skip, chứ không chỉ pha trộn theo một
-tỉ lệ cố định.
+Nhánh ảnh là ResNet trên pixel: **ảnh mờ cho vị trí đường nét, latent cho biết cảnh
+sạch nên trông thế nào**. Latent được upsample từ 16×16 lên 128×128 rồi trộn vào thân
+ResNet; tần số cao đi qua đường pixel và skip U-Net ở 256×256, nên upsample latent
+bằng bilinear không làm mất chi tiết. Nhánh IMU giữ decoder hệ số, với `SkipMerge`
+có cổng: skip cấp độ phân giải, latent quyết định giữ cái gì.
 
-Hai mũi tên nét đứt là hai đường **không đi qua trọng số nào**: hệ số của chính
-ảnh/IMU nhiễu cộng thẳng vào đầu ra. Đó là sàn identity — xem
+Hai mũi tên nét đứt tới dấu cộng là hai đường **không đi qua trọng số nào**: ảnh mờ
+và hệ số của IMU nhiễu cộng thẳng vào đầu ra. Đó là sàn identity — xem
 [Hai quyết định thiết kế quan trọng](#hai-quyết-định-thiết-kế-quan-trọng).
 
 > **Muốn phóng to?** Copy khối mermaid rồi dán vào <https://mermaid.live> để kéo
@@ -371,10 +420,11 @@ nhiễu kéo sập nhánh kia ngay từ update đầu.
 
 Hai dòng này giải thích phần lớn kết quả đo được:
 
-- `ZI` là `16×16`, tức **mỗi ô latent phải mô tả một khối 16×16 pixel**. Đây là
-  trần cứng của chi tiết ảnh, và không decoder nào vượt qua được nó. Muốn nét hơn
-  thì phải sửa chỗ này (`encoders.py`, đổi `stride=2` của stage cuối thành `1` để
-  có latent `32×32`), không phải sửa decoder.
+- `ZI` là `16×16`, tức **mỗi ô latent phải mô tả một khối 16×16 pixel**. Đó là trần
+  của những gì latent tự mang được. Decoder hệ số cũ chỉ chạm tới ảnh qua latent nên
+  dừng ở trần này; ResNet trên pixel đọc thẳng ảnh mờ ở 256×256 nên vượt được
+  (đường nét đúng chỗ 0,309 → 0,359). Cách khác là latent `32×32` (`encoders.py`,
+  đổi `stride=2` của stage cuối thành `1`), nhưng cách đó phải train lại phase 1.
 - `ZU` **không hề nén** — nó còn nhiều số hơn chính tín hiệu IMU. Đó là lý do
   metric IMU luôn tốt hơn metric ảnh: bài toán IMU không bị bóp cổ chai.
 
@@ -427,7 +477,27 @@ con số như vậy không thể đọc ra từ khối Jacobian cũ, vì nó ch�
 ### Phase 2 — decoder
 
 Backbone (transform + 2 encoder + fusion) **đóng băng ở chế độ eval**. Chỉ hai
-decoder được cập nhật. Nâng kích thước bằng **sub-pixel conv** (`Upsample`: conv
+decoder được cập nhật.
+
+**Decoder ảnh — ResNet trên pixel** (`image_decoder: resnet_pixel`, 799.811 tham số):
+
+| Bước | Shape |
+|---|---|
+| vào | ảnh mờ `[3, 256, 256]` (synthesis của `C_in`, tái tạo hoàn hảo) + `ZI [128, 16, 16]` |
+| `head` conv 3×3 + ReLU | `[32, 256, 256]` |
+| `down` conv 4×4 stride 2 + ReLU | `[64, 128, 128]` |
+| `latent` conv 1×1 + upsample | `[64, 128, 128]` |
+| `fuse` nối + conv 3×3 | `[64, 128, 128]` |
+| `trunk` 8 khối residual (conv–ReLU–conv + identity) | `[64, 128, 128]` |
+| `up` conv 3×3 → pixel shuffle ×2 + ReLU | `[32, 256, 256]` |
+| `tail` nối với `head` (skip U-Net), conv–ReLU–conv (**zero-init**) | `Δ [3, 256, 256]` |
+| cộng ảnh mờ | `ảnh mờ + Δ` |
+| QWT analysis (chỉ để chấm loss chi tiết) | `[48, 128, 128]` |
+
+Conv cuối zero-init nên ở update 0 đầu ra **đúng bằng** ảnh mờ — cùng sàn identity
+với decoder hệ số (`tests/test_resnet_decoder.py`).
+
+**Decoder IMU** (và decoder ảnh cũ `qwt_coefficients`, vẫn chọn được): Nâng kích thước bằng **sub-pixel conv** (`Upsample`: conv
 mở rộng kênh ×4 cho ảnh / ×2 cho IMU rồi `pixel_shuffle`), **không** dùng nội suy
 bilinear — bilinear là bộ lọc thông thấp nên không sinh được tần số cao.
 
@@ -473,13 +543,13 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | predictor ảnh | 66.176 | 1, rồi vứt |
 | predictor IMU | 66.176 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 | 1.556.656 | 2 |
-| decoder IMU phase 2 | 357.580 | 2 |
-| **decoder phase 2 (tổng)** | **1.914.236** | 2 |
+| decoder ảnh phase 2 — ResNet pixel | 799.811 | 2 |
+| decoder IMU phase 2 | 358.012 | 2 |
+| **decoder phase 2 (tổng)** | **1.157.823** | 2 |
+| *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |
 
-Chênh lệch 58.112 tham số giữa decoder phase 2 và decoder neo là sáu khối
-`SkipMerge` (ba cho ảnh, ba cho IMU). Decoder neo giữ nguyên kiến trúc cũ vì
-skip và residual đều là đường vòng quanh latent.
+Decoder neo giữ kiến trúc hệ số, không skip, không residual, vì skip và residual
+đều là đường vòng quanh latent — mà việc của neo là ép thông tin VÀO latent.
 
 Teacher EMA là bản sao của hai encoder (1.001.856 tham số) nhưng **không nhận
 gradient**, nên không tính vào đây.
@@ -490,7 +560,8 @@ riêng (`decoder_initialization_seed`).
 
 ## Hai quyết định thiết kế quan trọng
 
-**Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** Với
+**Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** ResNet ảnh cộng
+`Δ` vào chính ảnh mờ, conv cuối zero-init. Với
 `input_coefficient_residual: true`, đầu ra là `C_out = C_in + Δ(Z)` và head được
 khởi tạo bằng 0, nên tại update 0 model trả lại **đúng** input. Đó là một sàn mà
 model không thể tụt xuống dưới, và `Δ` chính là phần đóng góp đo được của latent:
@@ -513,7 +584,9 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/models/pipeline.py`: hai wrapper phase riêng. `LatentPretrainingModel`
   chỉ nhận decoder neo khi `phase1.decoder_enabled` bật, và decoder đó không đi
   sang phase 2; `RestorationSystem` giữ backbone ở eval/frozen.
-- `qjepa/models/decoders.py`: nhận `ZI/ZU`, và khi `encoder_skips` bật thì nhận
+- `qjepa/models/decoders.py`: `PixelResNetDecoder` cho ảnh (ảnh mờ + `ZI` → residual
+  trên pixel, khi `image_decoder: resnet_pixel`); decoder hệ số nhận `ZI/ZU`, và khi
+  `encoder_skips` bật thì nhận
   thêm ba tầng trung gian của encoder qua `SkipMerge` **có cổng** — cổng sinh từ
   đường latent nên latent quyết định cho bao nhiêu skip đi qua ở từng vị trí.
   Khởi tạo sao cho đóng góp skip ban đầu bằng 0, nên sàn identity không bị phá. Upsample bằng sub-pixel conv (pixel

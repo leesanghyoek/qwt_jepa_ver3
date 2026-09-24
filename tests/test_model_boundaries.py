@@ -36,7 +36,7 @@ def test_phase1_has_dense_shapes_teacher_stop_gradient_and_no_decoder():
 
 def test_absolute_decoder_ignores_the_input_and_preserves_batch_permutation():
     config = load_config("configs/smoke.yaml")
-    decoder = build_decoders(config, residual=False, skips=False).eval()
+    decoder = build_decoders(config, residual=False, skips=False, image_decoder="qwt_coefficients").eval()
     signature = inspect.signature(decoder.forward)
     assert list(signature.parameters) == ["ZI", "ZU", "image_base", "imu_base",
                                       "image_skips", "imu_skips"]
@@ -57,7 +57,7 @@ def test_absolute_decoder_ignores_the_input_and_preserves_batch_permutation():
 
 def test_residual_decoder_starts_at_identity_and_needs_the_base():
     config = load_config("configs/smoke.yaml")
-    decoder = build_decoders(config, residual=True, skips=False).eval()
+    decoder = build_decoders(config, residual=True, skips=False, image_decoder="qwt_coefficients").eval()
     zi = torch.randn(3, 32, 2, 2)
     zu = torch.randn(3, 32, 2)
     image_base = torch.randn(3, 48, 16, 16)
@@ -104,7 +104,7 @@ def test_encoder_only_reveals_stages_when_asked_and_keeps_the_same_output():
 def test_skip_decoder_keeps_the_identity_floor_and_refuses_a_mismatched_call():
     config = load_config("configs/smoke.yaml")
     system = RestorationSystem(build_backbone(config), ImuNormalizer(),
-                               build_decoders(config, residual=True, skips=True)).eval()
+                               build_decoders(config, residual=True, skips=True, image_decoder="qwt_coefficients")).eval()
     image = torch.rand(2, 3, 32, 32)
     imu = torch.randn(2, 6, 32)
     times = torch.arange(32).float().mul(0.01).repeat(2, 1)
@@ -116,12 +116,12 @@ def test_skip_decoder_keeps_the_identity_floor_and_refuses_a_mismatched_call():
     # qua ca ba diem noi, neu khong residual mat y nghia ngay o update 0.
     assert torch.allclose(restored.image, image, atol=1e-5)
 
-    without = build_decoders(config, residual=True, skips=False).eval()
+    without = build_decoders(config, residual=True, skips=False, image_decoder="qwt_coefficients").eval()
     with pytest.raises(ValueError, match="refusing to use them"):
         without(latent.ZI, latent.ZU, latent.image_coefficients, latent.imu_coefficients,
                 latent.image_skips, latent.imu_skips)
     with pytest.raises(ValueError, match="pass the encoder stages"):
-        build_decoders(config, residual=True, skips=True)(latent.ZI, latent.ZU,
+        build_decoders(config, residual=True, skips=True, image_decoder="qwt_coefficients")(latent.ZI, latent.ZU,
                                                           latent.image_coefficients,
                                                           latent.imu_coefficients)
 

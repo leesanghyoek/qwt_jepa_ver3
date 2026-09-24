@@ -91,8 +91,12 @@ class Phase2Trainer:
             # scores only what reaches the pixels. Absent from configs written
             # before the key existed, which keep scoring the decoder output.
             scores_image = self.phase.get("image_detail_source", "decoder_coefficients") == "restored_image"
-            with torch.set_grad_enabled(scores_image):
-                visible_coefficients, _ = image_transform.analysis(restored["image"])
+            if self.system.decoders.image_decoder == "resnet_pixel":
+                # Already analysis(image), computed with the graph in decode.
+                visible_coefficients = restored["image_coefficients"]
+            else:
+                with torch.set_grad_enabled(scores_image):
+                    visible_coefficients, _ = image_transform.analysis(restored["image"])
             image_coefficients = visible_coefficients if scores_image else restored["image_coefficients"]
             loss, parts = phase2_reconstruction_loss(
                 restored["image"],
@@ -139,7 +143,8 @@ class Phase2Trainer:
             "metadata": {
                 "pipeline_version": 3,
                 "phase": "latent_decoder_train",
-                "decoder_input": "fused_dense_latent_only",
+                "decoder_input": self.phase["decoder_input"],
+                "image_decoder": self.system.decoders.image_decoder,
                 "output_coefficients": self.phase["output_coefficients"],
                 "successful_updates": self.successful_updates,
                 "data_microbatches_consumed": self.successful_updates * self.phase["gradient_accumulation"],
