@@ -177,6 +177,22 @@ def validate_config(config: dict[str, Any]) -> None:
         for side in data["image_size"]:
             if side % phase2["split_color_scale"] or side % phase2["split_illumination_scale"]:
                 raise ValueError("phase2 split scales must divide the image sides")
+        arch = phase2.get("split_branch_arch", "resnet")
+        if arch not in ("resnet", "unet"):
+            raise ValueError("phase2.split_branch_arch must be resnet or unet")
+        if arch == "unet":
+            for key, scale in (("split_color_unet_widths", phase2["split_color_scale"]),
+                               ("split_edge_unet_widths", 1)):
+                widths = phase2.get(key)
+                if (not isinstance(widths, (list, tuple)) or len(widths) < 2
+                        or any(isinstance(w, bool) or not isinstance(w, int) or w < 1 for w in widths)):
+                    raise ValueError(f"phase2.{key} must list at least two positive channel counts")
+                step = scale * 2 ** (len(widths) - 1)
+                if any(side % step for side in data["image_size"]):
+                    raise ValueError(f"phase2.{key}: image sides must divide by {step}")
+            blocks = phase2.get("split_unet_blocks")
+            if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < 1:
+                raise ValueError("phase2.split_unet_blocks must be a positive integer")
     if image_decoder == "resnet_pixel":
         # Explicit, like skip_gating: the hash must record the trained width/depth.
         for key in ("image_resnet_width", "image_resnet_blocks"):
@@ -316,6 +332,11 @@ def build_decoders(
             "edge_blocks": int(config["phase2"].get("split_edge_blocks", 6)),
             "color_scale": int(config["phase2"].get("split_color_scale", 2)),
             "illumination_scale": int(config["phase2"].get("split_illumination_scale", 8)),
+            # Absent from p8 configs, which used the single-level ResNet branches.
+            "branch_arch": str(config["phase2"].get("split_branch_arch", "resnet")),
+            "color_widths": tuple(config["phase2"].get("split_color_unet_widths", (12, 16, 24, 32))),
+            "edge_widths": tuple(config["phase2"].get("split_edge_unet_widths", (16, 24, 32, 48, 56))),
+            "unet_blocks": int(config["phase2"].get("split_unet_blocks", 1)),
         },
     )
 

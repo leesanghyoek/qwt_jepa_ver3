@@ -245,6 +245,66 @@ class ColorBranch(nn.Module):
         return small + self.tail(self.trunk(self.fuse(torch.cat((x, z), dim=1))))
 
 
+class UNetBranch(nn.Module):
+    """Funnel and loudspeaker: a U-Net whose bottom sits on the latent's grid.
+
+    The funnel halves the resolution level by level (conv 4x4 stride 2), so each
+    level sees a wider area: near features at the top, deep features -- layout,
+    objects, overall exposure -- at the bottom. The bottom level has the same
+    grid as ZI (16x16 for a 256x256 image), so the JEPA latent joins there, where
+    it belongs, instead of being stretched to the working resolution. The
+    loudspeaker doubles the resolution back (sub-pixel conv) and, at every level,
+    takes the funnel's features of that level through a skip, so the near
+    features lost on the way down come back. Residual on ``base`` with a
+    zero-initialised last conv: it starts as the identity.
+
+    ``widths[i]`` is the channel count at level i; level 0 is the input
+    resolution and each next level is half of it.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, latent_channels: int = 128,
+                 widths: tuple[int, ...] = (24, 32, 64, 96, 128), blocks: int = 1) -> None:
+        super().__init__()
+        if len(widths) < 2:
+            raise ValueError("A funnel needs at least two levels")
+        self.levels = len(widths)
+        self.stem = nn.Conv2d(in_channels, widths[0], 3, padding=1)
+        self.down_blocks = nn.ModuleList(
+            nn.Sequential(*[_ResidualBlock(w) for _ in range(blocks)]) for w in widths[:-1])
+        self.downs = nn.ModuleList(
+            nn.Conv2d(widths[i], widths[i + 1], 4, stride=2, padding=1) for i in range(len(widths) - 1))
+        self.latent = nn.Conv2d(latent_channels, widths[-1], 1)
+        self.bottom = nn.Sequential(nn.Conv2d(2 * widths[-1], widths[-1], 3, padding=1), nn.ReLU(),
+                                    *[_ResidualBlock(widths[-1]) for _ in range(blocks)])
+        self.ups = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(widths[i + 1], widths[i] * 4, 3, padding=1), nn.PixelShuffle(2))
+            for i in range(len(widths) - 1))
+        self.merges = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(2 * w, w, 3, padding=1), nn.ReLU(),
+                          *[_ResidualBlock(w) for _ in range(blocks)]) for w in widths[:-1])
+        self.tail = nn.Conv2d(widths[0], out_channels, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None) -> torch.Tensor:
+        step = 2 ** (self.levels - 1)
+        if x.shape[-2] % step or x.shape[-1] % step:
+            raise ValueError(f"U-Net with {self.levels} levels needs sides divisible by {step}")
+        h = F.relu(self.stem(x))
+        skips = []
+        for block, down in zip(self.down_blocks, self.downs):   # funnel
+            h = block(h)
+            skips.append(h)
+            h = F.relu(down(h))
+        z = self.latent(latent)
+        if z.shape[-2:] != h.shape[-2:]:
+            z = F.interpolate(z, size=h.shape[-2:], mode="bilinear", align_corners=False)
+        h = self.bottom(torch.cat((h, z), dim=1))
+        for up, merge, skip in zip(reversed(self.ups), reversed(self.merges), reversed(skips)):  # loudspeaker
+            h = merge(torch.cat((F.relu(up(h)), skip), dim=1))
+        return (x if base is None else base) + self.tail(h)
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -265,13 +325,24 @@ class SplitColorEdgeDecoder(nn.Module):
     def __init__(
         self, latent_channels: int = 128, *, color_width: int = 32, color_blocks: int = 6,
         edge_width: int = 64, edge_blocks: int = 6, color_scale: int = 2, illumination_scale: int = 8,
+        branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
+        edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
     ) -> None:
         super().__init__()
         self.color_scale = int(color_scale)
         self.illumination_scale = int(illumination_scale)
-        self.color = ColorBranch(latent_channels, color_width, color_blocks)
-        self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
-                                       in_channels=2, out_channels=1)
+        self.branch_arch = branch_arch
+        if branch_arch == "unet":
+            # Funnel and loudspeaker on both branches, latent at the bottom.
+            self.color = UNetBranch(3, 3, latent_channels, tuple(color_widths), unet_blocks)
+            self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
+        elif branch_arch == "resnet":
+            # p8: layer names are part of its checkpoints; keep them.
+            self.color = ColorBranch(latent_channels, color_width, color_blocks)
+            self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
+                                           in_channels=2, out_channels=1)
+        else:
+            raise ValueError("branch_arch must be resnet or unet")
 
     def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         size = image.shape[-2:]

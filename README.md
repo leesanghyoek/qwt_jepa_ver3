@@ -154,6 +154,22 @@ so với 0,80 M), 32 frame valid kịch bản full:
 - Mỗi nhánh chạy một lần, 600 update, phase 1 chỉ 40 update. Không tách được phần nào
   của lợi ích đến từ việc tách kênh, phần nào từ loss riêng của nhánh đường nét.
 
+**Đã thử: phễu–loa (U-Net) cho cả hai nhánh** (`split_branch_arch: unet`). Phễu thu nhỏ
+256 → 128 → 64 → 32 → 16, latent ZI vào ở đáy 16×16 (đúng lưới của nó), loa phóng ngược lên
+có skip ở mỗi tầng. Cùng phase 1, cùng 600 update, **cùng số tham số** (0,791 M so với
+0,787 M):
+
+| | PSNR | SSIM | nét 8–16 px | nét 4–8 px | nét 2–4 px | độ đậm màu | tương phản |
+|---|---|---|---|---|---|---|---|
+| ảnh vào | 11,13 | 0,501 | 0,343 | 0,218 | 0,104 | 0,54 | 0,44 |
+| **p8 (một tầng)** | **16,32** | **0,616** | **0,629** | **0,273** | 0,107 | **0,78** | **0,79** |
+| phễu–loa | 15,94 | 0,573 | 0,387 | 0,230 | 0,104 | 0,69 | 0,75 |
+
+Ở cùng kích thước, phễu–loa kém hơn ở mọi chỉ số: nó dồn tham số xuống các tầng sâu (16×16,
+32×32), còn tầng 256×256 và 128×128 — nơi có đường nét — chỉ còn 16–24 kênh, so với 64 kênh ở
+128×128 của p8. Dải 2–4 px (chi tiết của vật nhỏ, vật ở xa) đứng yên ở mức ảnh vào với **mọi**
+kiến trúc đã thử: thông tin đó đã mất trong ảnh mờ. Recipe giữ p8; tùy chọn vẫn chọn được.
+
 ## Decoder ảnh ResNet (p7)
 
 Ý tưởng: QWT + Jacobian đưa ảnh về miền đường nét, JEPA học ảnh mờ và ảnh nét tương
