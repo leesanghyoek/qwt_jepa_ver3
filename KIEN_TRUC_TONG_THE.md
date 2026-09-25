@@ -15,9 +15,10 @@
    (mũi tên skip), tách thành hai nhánh: **màu** ở 128×128 và **đường nét** trên kênh sáng Y ở
    256×256, rồi ghép lại. Decoder IMU nhận ZU.
 
-**Phía dưới hình: các phương án đã thử và bỏ** — QWT db4 cũ, Jacobian cũ, blur tính từ gyro
-(tắt), decoder hệ số QWT, loss modulus, ResNet một khối, phễu–loa U-Net, GAN. Mỗi thẻ ghi kết
-quả đo và lý do bỏ.
+**Phía dưới hình: bên trong mỗi nhánh là một CNN phễu–loa (U-Net).** Phễu thu nhỏ ÷2 mỗi tầng
+(256 → 128 → 64 → 32 → 16 cho nhánh đường nét, 128 → … → 16 cho nhánh màu) xuống đáy 16×16, nơi
+latent ZI đi vào; loa phóng ×2 trở lại, skip mang đặc trưng gần của mỗi tầng từ phễu sang loa.
+Recipe p8 hiện train mỗi nhánh bằng CNN một tầng; phễu–loa bật bằng `split_branch_arch: unet`.
 
 | | Phase 1 | Phase 2 |
 |---|---|---|

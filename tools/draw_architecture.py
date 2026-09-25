@@ -5,7 +5,7 @@ Usage: python3 tools/draw_architecture.py docs/kien_truc.svg
 import sys
 from xml.sax.saxutils import escape
 
-W, H = 1280, 1126
+W, H = 1280, 1416
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -74,9 +74,9 @@ zi = node(705, 205, 110, 70, 'lat', 'ZI', ['128 × 16 × 16'])
 zu = node(705, 365, 110, 70, 'lat', 'ZU', ['128 × 8'])
 # ---------------- phase 2: image decoder group
 el.append('<rect x="855" y="150" width="200" height="185" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
-text(955, 170, 'Decoder ảnh', size=14, weight='bold', color='#2E7D32')
-colb = node(870, 180, 170, 62, 'color', 'Nhánh MÀU', ['128 × 128 · màu + độ sáng'], title_size=15)
-edgb = node(870, 262, 170, 62, 'edge', 'Nhánh ĐƯỜNG NÉT', ['kênh Y · 256 × 256'], title_size=15)
+text(955, 170, 'Decoder ảnh · phễu–loa', size=14, weight='bold', color='#2E7D32')
+colb = node(870, 180, 170, 62, 'color', 'Nhánh MÀU', ['U-Net 128² · màu + độ sáng'], title_size=15)
+edgb = node(870, 262, 170, 62, 'edge', 'Nhánh ĐƯỜNG NÉT', ['U-Net 256² · kênh Y'], title_size=15)
 join = node(1080, 222, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1160, 212, 95, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(870, 365, 170, 70, 'edge', 'Decoder IMU', ['Haar · skip từ encoder'], title_size=15)
@@ -118,55 +118,64 @@ arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', 
 arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
 text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
 
-# ---------------- tried and dropped
+# ---------------- inside the image decoder: funnel and loudspeaker (U-Net) CNNs
 el.append('<line x1="20" y1="728" x2="1260" y2="728" stroke="#B0BEC5" stroke-width="1.5"/>')
-text(20, 760, 'Các phương án đã thử và bỏ', size=19, weight='bold', color='#37474F', anchor='start')
-text(290, 760, '(theo thứ tự thời gian · số đo là phép thử cục bộ hoặc run Kaggle)', size=14, color='#78909C', anchor='start')
+text(20, 760, 'Bên trong decoder ảnh: mỗi nhánh là một CNN phễu–loa (U-Net)', size=19, weight='bold', color='#37474F', anchor='start')
+text(20, 784, 'Phễu thu nhỏ ÷2 mỗi tầng xuống đáy 16×16, nơi latent ZI (cũng 16×16) đi vào · loa phóng ×2 trở lại · '
+     'skip đưa đặc trưng gần của mỗi tầng từ phễu sang loa', size=13, color='#607D8B', anchor='start')
 
-TAG = {'bb': ('BACKBONE', '#1E88E5'), 'data': ('DỮ LIỆU', '#757575'), 'dec': ('DECODER ẢNH', '#2E7D32')}
+def unet(x0, y0, levels, channels, kind, title, input_label, output_label, dx=70, dy=80, bw=30):
+    """U-Net drawing: block height ~ resolution, funnel left, loudspeaker right."""
+    fill, stroke = C[kind]
+    L = len(levels)
+    heights = [132, 96, 68, 48, 32][5 - L:]
+    yc = [y0 + 80 + i * dy for i in range(L)]
+    xf = [x0 + i * dx for i in range(L)]                      # funnel; xf[-1] is the bottom
+    xl = [x0 + (2 * (L - 1) - i) * dx for i in range(L)]      # loudspeaker
+    text(x0 + (L - 1) * dx + bw / 2, y0 + 4, title, size=15, weight='bold', color=stroke)
+    def block(x, i, fill=fill, stroke=stroke):
+        h = heights[i]
+        el.append(f'<rect x="{x}" y="{yc[i] - h / 2}" width="{bw}" height="{h}" rx="4" fill="{fill}" stroke="{stroke}" stroke-width="1.8"/>')
+    for i in range(L - 1):
+        block(xf[i], i); block(xl[i], i)
+        label = f'{levels[i]}² · {channels[i]} kênh'
+        text(xf[i] + bw / 2, yc[i] - heights[i] / 2 - 7, label, size=11, color='#37474F')
+        text(xl[i] + bw / 2, yc[i] - heights[i] / 2 - 7, label, size=11, color='#37474F')
+        el.append(f'<path d="M {xf[i] + bw} {yc[i]} L {xl[i]} {yc[i]}" stroke="#90A4AE" stroke-width="1.6" '
+                  f'stroke-dasharray="5 4" fill="none" marker-end="url(#ah-90A4AE)"/>')
+        arrow([(xf[i] + bw / 2, yc[i] + heights[i] / 2), (xf[i] + bw / 2, yc[i + 1]), (xf[i + 1], yc[i + 1])], color=stroke, width=1.8)
+        arrow([(xl[i + 1] + bw, yc[i + 1]), (xl[i] + bw / 2, yc[i + 1]),
+               (xl[i] + bw / 2, yc[i] + heights[i] / 2)], color=stroke, width=1.8)
+    text((xf[0] + xl[0] + bw) / 2, yc[0] - 5, 'skip: đặc trưng gần', size=11, color='#78909C',
+         style='font-style="italic"')
+    xb = xf[-1]                                              # bottom: the latent joins here
+    block(xb, L - 1, fill=C['lat'][0], stroke=C['lat'][1])
+    arrow([(xb + bw / 2, yc[-1] + 70), (xb + bw / 2, yc[-1] + heights[-1] / 2)], color=C['lat'][1], width=2.2)
+    text(xb + bw / 2, yc[-1] + 86, 'ZI 128 × 16 × 16 (JEPA)', size=12, weight='bold', color=C['lat'][1])
+    text(xb + bw / 2 - 8, yc[-1] + heights[-1] / 2 + 20, f'đáy {levels[-1]}² · {channels[-1]} kênh', size=11,
+         color='#37474F', anchor='end')
+    top = yc[0] - heights[0] / 2
+    arrow([(xf[0] + bw / 2, top - 46), (xf[0] + bw / 2, top - 22)], color='#455A64', width=1.8)
+    text(xf[0] - 4, top - 52, input_label, size=12, weight='bold', color='#37474F', anchor='start')
+    arrow([(xl[0] + bw / 2, top - 22), (xl[0] + bw / 2, top - 46)], color='#455A64', width=1.8)
+    text(xl[0] + bw + 4, top - 52, output_label, size=12, weight='bold', color='#37474F', anchor='end')
+    text(x0 + (L - 1) * dx / 2 + bw / 2 - 20, yc[-1] + 6, 'PHỄU', size=14, weight='bold', color=stroke)
+    text(x0 + 3 * (L - 1) * dx / 2 + bw / 2 + 20, yc[-1] + 6, 'LOA', size=14, weight='bold', color=stroke)
 
-def card(x, y, tag, title, lines, verdict, off=False):
-    w, h = 298, 158
-    el.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="#FFFFFF" stroke="#CFD8DC" stroke-width="1.5"/>')
-    label, colour = TAG[tag]
-    el.append(f'<rect x="{x}" y="{y}" width="{w}" height="6" rx="3" fill="{colour}"/>')
-    text(x + 14, y + 26, label, size=11, weight='bold', color=colour, anchor='start')
-    text(x + 14, y + 49, title, size=16, weight='bold', anchor='start')
-    for i, line in enumerate(lines):
-        text(x + 14, y + 72 + 19 * i, line, size=13, color='#37474F', anchor='start')
-    fill, stroke, mark = ('#FFF8E1', '#B26A00', '⏸') if off else ('#FFEBEE', '#C62828', '✗')
-    el.append(f'<rect x="{x + 10}" y="{y + h - 36}" width="{w - 20}" height="26" rx="13" fill="{fill}"/>')
-    text(x + 22, y + h - 18, f'{mark}  {verdict}', size=13, weight='bold', color=stroke, anchor='start')
+unet(70, 850, [256, 128, 64, 32, 16], [16, 24, 32, 48, 56], 'edge', 'Nhánh ĐƯỜNG NÉT (kênh Y) · 0,63 M',
+     'vào: Y ảnh mờ + độ sáng nền', 'ra: chi tiết Y (mọi cạnh)')
+unet(800, 850, [128, 64, 32, 16], [12, 16, 24, 32], 'color', 'Nhánh MÀU · 0,16 M',
+     'vào: ảnh mờ thu nhỏ ½', 'ra: ảnh nền màu', dx=62)
 
-X = [20, 334, 648, 962]
-card(X[0], 780, 'bb', 'QWT db4 (bản cũ)',
-     ['4 cây db4 lệch 1 mẫu', 'năng lượng tần số âm 0,18:', 'không phải cặp Hilbert'],
-     'thay bằng QWT Hilbert (0,07)')
-card(X[1], 780, 'bb', 'Jacobian cũ',
-     ['phạt độ nhạy theo 1 hướng ngẫu nhiên', '⇒ encoder bớt nhạy với mọi thứ,', 'kéo về collapse (trọng số 1e-4)'],
-     'thay bằng tỉ số g_nhiễu / g_tín hiệu')
-card(X[2], 780, 'data', 'Blur tính từ gyro',
-     ['ảnh mờ = tích phân chuyển động IMU', 'đã dựng và kiểm chứng', '(tương quan ≥ 0,9998)'],
-     'tắt: giả định ảnh mờ do camera', off=True)
-card(X[3], 780, 'dec', 'Decoder hệ số QWT (p3–p6)',
-     ['ZI 16×16 → 48 hệ số QWT → synthesis', 'nét đúng chỗ 0,31; 3 biến thể', 'dừng ở cùng một mức chi tiết'],
-     'thay bằng decoder trên pixel')
-card(X[0], 948, 'dec', 'Loss modulus |q| (p5)',
-     ['khớp độ lớn chi tiết,', 'không xét đúng vị trí', '⇒ sọc chu kỳ 2 px (3,2× ảnh sạch)'],
-     'bỏ, quay về L1 hệ số')
-card(X[1], 948, 'dec', 'ResNet một khối (p7)',
-     ['ảnh mờ + ZI → Δ · 0,80 M tham số', 'nét đúng chỗ 0,36', '(decoder hệ số: 0,31)'],
-     'thay bằng tách màu + đường nét (0,47)')
-card(X[2], 948, 'dec', 'Phễu–loa U-Net',
-     ['256 → 16 → 256, ZI ở đáy · 0,79 M', 'nét 8–16 px: 0,39 so với 0,63 (p8)', 'tầng có đường nét quá ít kênh'],
-     'kém p8 ở cùng kích thước')
-card(X[3], 948, 'dec', 'GAN (PatchGAN)',
-     ['discriminator chấm', '"ảnh này trông có thật không"', 'PSNR/SSIM giảm ở run Kaggle'],
-     'bỏ theo quyết định, không dùng')
+# how a CNN level is built
+el.append('<rect x="20" y="1362" width="1240" height="40" rx="8" fill="#F5F7F8" stroke="#CFD8DC" stroke-width="1"/>')
+text(36, 1387, 'Mỗi khối CNN = conv 3×3 + khối residual (conv–ReLU–conv + identity)  ·  phễu: conv 4×4 bước 2 (÷2)  ·  '
+     'loa: conv + pixel shuffle (×2), nối với skip rồi conv  ·  conv cuối zero-init  ·  bật bằng split_branch_arch: unet',
+     size=13, color='#37474F', anchor='start')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825'))
+    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825', '#90A4AE', '#1E88E5', '#8E24AA'))
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" font-family="{FONT}">'
        f'<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
        f'<path d="M0,0 L10,5 L0,10 z" fill="#455A64"/></marker>{markers}</defs>'
