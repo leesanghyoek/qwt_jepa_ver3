@@ -9,7 +9,8 @@ import torch
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
-from .losses import invisible_detail_fraction, phase2_reconstruction_loss
+from ..models.decoders import PIXEL_IMAGE_DECODERS
+from .losses import color_edge_split_loss, invisible_detail_fraction, phase2_reconstruction_loss
 from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
@@ -91,7 +92,7 @@ class Phase2Trainer:
             # scores only what reaches the pixels. Absent from configs written
             # before the key existed, which keep scoring the decoder output.
             scores_image = self.phase.get("image_detail_source", "decoder_coefficients") == "restored_image"
-            if self.system.decoders.image_decoder == "resnet_pixel":
+            if self.system.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
                 # Already analysis(image), computed with the graph in decode.
                 visible_coefficients = restored["image_coefficients"]
             else:
@@ -115,6 +116,18 @@ class Phase2Trainer:
                 # keep meaning what they meant when they were trained.
                 image_detail_loss=str(self.phase.get("image_detail_loss", "coefficient")),
             )
+            if "image_detail" in restored:
+                split_loss, split_parts = color_edge_split_loss(
+                    restored["image_color_base"], restored["image_illumination"],
+                    restored["image_detail"], restored["image"], batch["image_clean"],
+                    color_scale=int(self.phase["split_color_scale"]),
+                    illumination_scale=int(self.phase["split_illumination_scale"]),
+                    color_weight=float(self.phase["split_color_weight"]),
+                    edge_weight=float(self.phase["split_edge_weight"]),
+                    gradient_weight=float(self.phase["split_gradient_weight"]),
+                )
+                loss = loss + split_loss
+                parts.update(split_parts)
             with torch.no_grad():
                 parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                     restored["image_coefficients"], visible_coefficients)

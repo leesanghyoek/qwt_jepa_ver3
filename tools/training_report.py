@@ -38,6 +38,7 @@ IMAGE_METRICS = {
     "image_psnr_db": ("PSNR (dB)", True),
     "image_ssim": ("SSIM", True),
     "image_mae": ("MAE ảnh", False),
+    "image_color_error": ("sai số màu", False),
 }
 IMU_METRICS = {
     "accel_rmse": ("accel RMSE (m/s²)", False),
@@ -51,6 +52,7 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "variance", "covarianc
                 "encoder_sensitivity", "gradient_norm")
 PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
                 "image_detail_energy", "image_detail_invisible_fraction",
+                "image_color_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")

@@ -7,8 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .blocks import Stage, Upsample, initialize_trainable, resize
+from .color_edge import color_base, compose, downsample, illumination, luminance, upsample
 
-IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel")
+IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel", "split_color_edge")
+# Decoders that produce pixels; RestorationSystem.decode drives them.
+PIXEL_IMAGE_DECODERS = ("resnet_pixel", "split_color_edge")
 
 
 class SkipMerge(nn.Module):
@@ -186,26 +189,101 @@ class PixelResNetDecoder(nn.Module):
     the same identity floor as the coefficient residual.
     """
 
-    def __init__(self, latent_channels: int = 128, width: int = 64, blocks: int = 8) -> None:
+    def __init__(
+        self, latent_channels: int = 128, width: int = 64, blocks: int = 8,
+        in_channels: int = 3, out_channels: int = 3,
+    ) -> None:
         super().__init__()
-        self.head = nn.Sequential(nn.Conv2d(3, 32, 3, padding=1), nn.ReLU())
+        # Layer names are part of every saved checkpoint: keep them as they are.
+        self.head = nn.Sequential(nn.Conv2d(in_channels, 32, 3, padding=1), nn.ReLU())
         self.down = nn.Sequential(nn.Conv2d(32, width, 4, stride=2, padding=1), nn.ReLU())
         self.latent = nn.Conv2d(latent_channels, width, 1)
         self.fuse = nn.Conv2d(2 * width, width, 3, padding=1)
         self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
         self.up = nn.Sequential(nn.Conv2d(width, 32 * 4, 3, padding=1), nn.PixelShuffle(2), nn.ReLU())
-        self.tail = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(), nn.Conv2d(32, 3, 3, padding=1))
+        self.tail = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(),
+                                  nn.Conv2d(32, out_channels, 3, padding=1))
         nn.init.zeros_(self.tail[-1].weight)
         nn.init.zeros_(self.tail[-1].bias)
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, latent: torch.Tensor, image: torch.Tensor, base: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """``image + delta``; with ``base`` given, ``base + delta`` instead."""
         if image.shape[-2] % 2 or image.shape[-1] % 2:
             raise ValueError(f"Pixel decoder needs even image sides, got {tuple(image.shape[-2:])}")
         head = self.head(image)
         x = self.down(head)
         z = F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
         x = self.trunk(self.fuse(torch.cat((x, z), dim=1)))
-        return image + self.tail(torch.cat((self.up(x), head), dim=1))
+        return (image if base is None else base) + self.tail(torch.cat((self.up(x), head), dim=1))
+
+
+class ColorBranch(nn.Module):
+    """Colour and brightness at reduced resolution: a residual on the averaged input.
+
+    Colour is what a mean loss restores well -- the average of the plausible
+    colours IS the right colour -- so this branch is trained with L1 and kept
+    away from edges. Working at reduced resolution also averages away most of
+    the colour noise a dark frame carries. Zero-initialised tail: it starts as
+    the averaged input.
+    """
+
+    def __init__(self, latent_channels: int = 128, width: int = 32, blocks: int = 6) -> None:
+        super().__init__()
+        self.head = nn.Sequential(nn.Conv2d(3, width, 3, padding=1), nn.ReLU())
+        self.latent = nn.Conv2d(latent_channels, width, 1)
+        self.fuse = nn.Conv2d(2 * width, width, 3, padding=1)
+        self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
+        self.tail = nn.Conv2d(width, 3, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, latent: torch.Tensor, small: torch.Tensor) -> torch.Tensor:
+        x = self.head(small)
+        z = upsample(self.latent(latent), x.shape[-2:])
+        return small + self.tail(self.trunk(self.fuse(torch.cat((x, z), dim=1))))
+
+
+class SplitColorEdgeDecoder(nn.Module):
+    """Restore colour and edges apart, then put them back together.
+
+    * Colour branch: the blurry image averaged down by ``color_scale`` plus the
+      latent -> the colour base, and from it the illumination (luminance at
+      periods of ``illumination_scale`` px and longer).
+    * Edge branch: blurry LUMINANCE at full resolution plus the latent -> the
+      luminance detail, i.e. every edge. It also sees the predicted illumination
+      (detached), so it knows how bright the clean frame is and how strong its
+      edges should be, without its loss steering the colour branch.
+    * ``compose``: chroma from the base, luminance = illumination + detail.
+
+    At initialisation both residuals are zero: the output has exactly the input's
+    luminance and the input's colour at ``color_scale`` resolution.
+    See qjepa/models/color_edge.py for why the split is exact.
+    """
+
+    def __init__(
+        self, latent_channels: int = 128, *, color_width: int = 32, color_blocks: int = 6,
+        edge_width: int = 64, edge_blocks: int = 6, color_scale: int = 2, illumination_scale: int = 8,
+    ) -> None:
+        super().__init__()
+        self.color_scale = int(color_scale)
+        self.illumination_scale = int(illumination_scale)
+        self.color = ColorBranch(latent_channels, color_width, color_blocks)
+        self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
+                                       in_channels=2, out_channels=1)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        size = image.shape[-2:]
+        if size[0] % self.illumination_scale or size[1] % self.illumination_scale:
+            raise ValueError(f"Image sides {tuple(size)} must divide by {self.illumination_scale}")
+        base = upsample(self.color(latent, downsample(image, self.color_scale)), size)
+        light = illumination(base, self.illumination_scale)
+        y = luminance(image)
+        detail_in = y - illumination(color_base(image, self.color_scale), self.illumination_scale)
+        detail = self.edge(latent, torch.cat((y, light.detach()), dim=1), base=detail_in)
+        parts = {"image_color_base": base, "image_illumination": light, "image_detail": detail}
+        return compose(base, light, detail), parts
 
 
 class LatentDecoders(nn.Module):
@@ -229,6 +307,7 @@ class LatentDecoders(nn.Module):
         image_decoder: str = "qwt_coefficients",
         resnet_width: int = 64,
         resnet_blocks: int = 8,
+        split: dict | None = None,
     ) -> None:
         super().__init__()
         if image_decoder not in IMAGE_DECODERS:
@@ -238,6 +317,8 @@ class LatentDecoders(nn.Module):
         self.image_decoder = image_decoder
         if image_decoder == "resnet_pixel":
             self.image = PixelResNetDecoder(channels[3], resnet_width, resnet_blocks)
+        elif image_decoder == "split_color_edge":
+            self.image = SplitColorEdgeDecoder(channels[3], **(split or {}))
         else:
             self.image = LatentCoefficientDecoder(
                 48, image_coefficient_size, channels, dim=2, groups=groups,
@@ -259,8 +340,8 @@ class LatentDecoders(nn.Module):
         image_skips: tuple[torch.Tensor, ...] | None = None,
         imu_skips: tuple[torch.Tensor, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.image_decoder != "qwt_coefficients":
-            raise ValueError("The pixel image decoder is driven by RestorationSystem.decode")
+        if self.image_decoder in PIXEL_IMAGE_DECODERS:
+            raise ValueError("A pixel image decoder is driven by RestorationSystem.decode")
         return (
             self.image(ZI, image_base, image_skips),
             self.imu(ZU, imu_base, imu_skips),

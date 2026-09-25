@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from ..models.color_edge import color_error
+
 
 def _ssim(restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
     """Channel-wise local SSIM with data_range=1."""
@@ -76,6 +78,8 @@ def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, floa
         "image_psnr_db": float(psnr),
         "image_ssim": float(_ssim(restored, clean)),
         **spectral_ratios(restored, clean),
+        # Chroma after 4x4 averaging: colour cast and colour noise, not sharpness.
+        "image_color_error": float(color_error(restored, clean)),
     }
 
 

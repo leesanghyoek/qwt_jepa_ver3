@@ -169,7 +169,7 @@ def _ablate(system, loader, device, batches: int) -> None:
     luan diem latent-first mat sach. Day la phep do duy nhat tach duoc hai truong hop.
     """
     # The pixel ResNet always has a path around the latent: the blurry image.
-    if not system.decoders.uses_skips and system.decoders.image_decoder != "resnet_pixel":
+    if not system.decoders.uses_skips and system.decoders.image_decoder == "qwt_coefficients":
         print("\n(--ablate-latent: decoder khong dung skip, phep do nay khong co y nghia)")
         return
     full = zeroed = count = 0.0

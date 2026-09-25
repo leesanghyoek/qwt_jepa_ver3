@@ -268,7 +268,25 @@ phase2:
   # canh 0,520 -> 0,465. Ba bien the decoder he so truoc do deu dung o cung mot san,
   # nen gioi han nam o kieu decoder chu khong o latent. IMU giu decoder he so.
   # Config cu khong co khoa nay = qwt_coefficients.
-  image_decoder: resnet_pixel
-  image_resnet_width: 64    # kenh cua than ResNet (o 128x128)
-  image_resnet_blocks: 8    # so khoi residual
+  #
+  # "split_color_edge" = tach MAU va DUONG NET, khoi phuc rieng roi ghep lai
+  # (qjepa/models/color_edge.py). Nhanh mau chay o 128x128, hoc bang L1 (dap an
+  # trung binh cua mau chinh la mau dung). Nhanh duong net chay tren kenh sang Y o
+  # 256x256 va viet moi canh; cong CUNG mot so vao R, G, B nen no khong the lam
+  # lech mau. A/B cuc bo cung phase 1, 600 update, cung so tham so (0,79 M vs
+  # 0,80 M): noi dung duong net dung cho 0,360 (resnet_pixel) -> 0,465, PSNR
+  # 16,06 -> 16,32, SSIM 0,573 -> 0,616; sai so mau gan nhu khong doi.
+  image_decoder: split_color_edge
+  split_color_width: 32         # kenh nhanh mau (o 128x128)
+  split_color_blocks: 6
+  split_edge_width: 64          # kenh nhanh duong net (than o 128x128)
+  split_edge_blocks: 6
+  split_color_scale: 2          # mau o 256/2 = 128x128: tran 34,9 dB (64x64: 31,9 dB)
+  split_illumination_scale: 8   # do sang nen: chu ky >= 16 px, khong co canh
+  split_color_weight: 1.0       # L1 cua Cb, Cr va do sang nen
+  split_edge_weight: 1.0        # L1 cua chi tiet kenh sang
+  split_gradient_weight: 1.0    # L1 do doc canh cua Y: nhanh C, tot nhat trong A/B
+  # Van chon duoc: image_decoder: resnet_pixel dung hai khoa duoi.
+  image_resnet_width: 64
+  image_resnet_blocks: 8
   precision: fp32

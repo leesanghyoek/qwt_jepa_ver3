@@ -4,7 +4,7 @@ So sánh giữa `d06d214` (trước) và `fc9ebcf` (sau). Mọi con số trong t
 đều **đo được**, kèm lệnh tái lập; không có số nào là ước lượng.
 
 > Mục 1–8 là đợt thay đổi QWT + Jacobian. **Phase 2 đổi tiếp sau đó** (loss chi
-> tiết, cách chấm loss, decoder ảnh ResNet): xem [mục 9](#9-sau-đó-phase-2-từ-p5-đến-p7).
+> tiết, cách chấm loss, decoder ảnh): xem [mục 9](#9-sau-đó-phase-2-từ-p5-đến-p8).
 
 ---
 
@@ -20,7 +20,7 @@ So sánh giữa `d06d214` (trước) và `fc9ebcf` (sau). Mọi con số trong t
 | Trọng số Jacobian | `1e-4` (trơ) | `0,05` (có tác dụng) | ×500 |
 | Số tham số backbone | 1.333.120 | 1.333.120 | **không đổi** |
 | Latent `ZI` | `128 × 16 × 16` | `128 × 16 × 16` | **không đổi** |
-| Loss phase 2 | L1 + detail + energy + variation | y hệt | không đổi ở đợt này — [đổi sau đó](#9-sau-đó-phase-2-từ-p5-đến-p7) |
+| Loss phase 2 | L1 + detail + energy + variation | y hệt | không đổi ở đợt này — [đổi sau đó](#9-sau-đó-phase-2-từ-p5-đến-p8) |
 | Test | 100 | 111 | +11 |
 
 Ba thay đổi, không thay đổi nào chạm vào số tham số hay kích thước latent. Đây
@@ -383,19 +383,19 @@ python3 -m pytest tests/ -q     # 111 passed
 
 ---
 
-## 9. Sau đó: phase 2 từ p5 đến p7
+## 9. Sau đó: phase 2 từ p5 đến p8
 
 Phase 1 giữ nguyên từ p5 (hash `ef8ef433`), nên mọi thay đổi dưới đây chỉ train lại
 phase 2.
 
-| | Trước (p4) | p5 | Hiện tại (p7) |
-|---|---|---|---|
-| **Decoder ảnh** | latent 16×16 → 48 kênh hệ số QWT → synthesis | như p4 | **ResNet trên pixel**: ảnh mờ 256×256 (skip) + `ZI` → residual cộng vào ảnh mờ |
-| **Loss chi tiết ảnh** | L1 trên từng hệ số | L1 trên modulus `\|q\|` | L1 trên từng hệ số |
-| **Chấm loss trên** | 48 kênh decoder xuất ra | 48 kênh decoder xuất ra | **hệ số của ảnh khôi phục** |
-| Decoder IMU | hệ số Haar, skip có cổng | như p4 | như p4 |
-| Tham số decoder ảnh | 1.577.392 | 1.577.392 | **799.811** |
-| Chỉ số độ nét | PSNR, SSIM | PSNR, SSIM | + đường nét thật (4–16 px), sọc (2 px) |
+| | Trước (p4) | p5 | p7 | Hiện tại (p8) |
+|---|---|---|---|---|
+| **Decoder ảnh** | latent 16×16 → 48 kênh hệ số QWT → synthesis | như p4 | **ResNet trên pixel**: ảnh mờ 256×256 (skip) + `ZI` → residual | **tách màu + đường nét**: màu 128×128, đường nét trên Y 256×256, ghép lại |
+| **Loss chi tiết ảnh** | L1 trên từng hệ số | L1 trên modulus `\|q\|` | L1 trên từng hệ số | như p7 + L1 màu + L1 chi tiết Y + độ dốc cạnh |
+| **Chấm loss trên** | 48 kênh decoder xuất ra | 48 kênh decoder xuất ra | **hệ số của ảnh khôi phục** | như p7 |
+| Decoder IMU | hệ số Haar, skip có cổng | như p4 | như p4 | như p4 |
+| Tham số decoder ảnh | 1.577.392 | 1.577.392 | 799.811 | **786.564** |
+| Chỉ số | PSNR, SSIM | PSNR, SSIM | + đường nét thật (4–16 px), sọc (2 px) | + sai số màu |
 
 ### Vì sao bỏ cách chấm cũ
 
@@ -429,12 +429,30 @@ một mức chi tiết; cả ba chỉ chạm tới ảnh qua hệ số dựng t�
 thẳng ảnh mờ ở 256×256 và hơn cả ba dù ít tham số hơn một nửa. Phần latent JEPA đóng
 góp cho ResNet được đo trên checkpoint thật bằng `delta_report.py --ablate-latent`.
 
+### Vì sao tách màu và đường nét (p8)
+
+Mắt người thấy độ nét gần như chỉ qua độ sáng Y. Tách ra: nhánh màu khôi phục Cb, Cr và
+độ sáng nền (chu kỳ ≥ 16 px) ở 128×128 bằng L1; nhánh đường nét khôi phục mọi cạnh của
+Y ở 256×256. Ghép bằng cách cộng cùng một số vào R, G, B, nên nhánh đường nét không làm
+lệch được màu. A/B cục bộ, cùng phase 1, 600 update, cùng số tham số:
+
+| decoder ảnh | PSNR | SSIM | đường nét đúng chỗ | sai số dải cạnh | sai số màu |
+|---|---|---|---|---|---|
+| ResNet một khối (p7) | 16,06 | 0,573 | 0,360 | 0,464 | 0,0281 |
+| tách, chỉ L1 | 16,28 | 0,610 | 0,445 | 0,402 | 0,0279 |
+| **tách + độ dốc cạnh (p8)** | **16,32** | **0,616** | **0,465** | **0,389** | 0,0279 |
+
+Đường nét tăng rõ và PSNR/SSIM cùng tăng. Sai số màu gần như không đổi: lợi ích thật nằm
+ở đường nét, không ở màu. Không dùng GAN.
+
 | file | thay đổi |
 |---|---|
-| `qjepa/models/decoders.py` | `PixelResNetDecoder`, chọn bằng `phase2.image_decoder` |
+| `qjepa/models/color_edge.py` | **mới** — tách/ghép màu, độ sáng nền, chi tiết Y; độ dốc cạnh; sai số màu |
+| `qjepa/models/decoders.py` | `PixelResNetDecoder`, `ColorBranch`, `SplitColorEdgeDecoder`, chọn bằng `phase2.image_decoder` |
 | `qjepa/models/pipeline.py` | `decode` dựng ảnh mờ từ hệ số input (tái tạo hoàn hảo) rồi chạy ResNet |
 | `qjepa/training/phase2.py` | `image_detail_source`, log `image_detail_invisible_fraction` |
-| `qjepa/evaluation/metrics.py` | `image_edge_power`, `image_stripe_power` |
-| `tests/test_resnet_decoder.py`, `tests/test_image_detail_source.py` | **mới** |
+| `qjepa/evaluation/metrics.py` | `image_edge_power`, `image_stripe_power`, `image_color_error` |
+| `qjepa/training/losses.py` | `color_edge_split_loss` |
+| `tests/test_resnet_decoder.py`, `tests/test_image_detail_source.py`, `tests/test_color_edge_decoder.py` | **mới** |
 
-Test: 141 passed.
+Test: 151 passed.

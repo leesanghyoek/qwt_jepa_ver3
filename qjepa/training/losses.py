@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from ..models.color_edge import chroma, luminance_gradient_l1, split_targets
 from ..models.predictors import image_tokens, imu_tokens
 
 
@@ -161,6 +162,39 @@ def detail_energy_gap(predicted: torch.Tensor, target: torch.Tensor, dim: int) -
     # hanh xu khac HH nen khong duoc tron chung.
     axes = tuple(range(2, got.ndim))
     return (got.square().mean(axes).sqrt() - want.square().mean(axes).sqrt()).abs().mean()
+
+
+def color_edge_split_loss(
+    base: torch.Tensor,
+    light: torch.Tensor,
+    detail: torch.Tensor,
+    restored: torch.Tensor,
+    clean: torch.Tensor,
+    *,
+    color_scale: int,
+    illumination_scale: int,
+    color_weight: float,
+    edge_weight: float,
+    gradient_weight: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Separate targets for the two branches of the split decoder.
+
+    Colour: chroma of the base and the illumination against the same pieces of
+    the clean frame -- L1, whose mean answer is the right colour. Edges: the
+    luminance detail against the clean frame's. Optionally the luminance
+    gradient of the whole output, which scores edge slopes directly.
+    """
+    with torch.no_grad():
+        base_t, light_t, detail_t = split_targets(clean, color_scale, illumination_scale)
+    color = F.l1_loss(chroma(base), chroma(base_t)) + F.l1_loss(light, light_t)
+    edge = F.l1_loss(detail, detail_t)
+    total = color_weight * color + edge_weight * edge
+    parts = {"image_color_l1": color, "image_edge_detail_l1": edge}
+    if gradient_weight > 0:
+        gradient = luminance_gradient_l1(restored, clean)
+        total = total + gradient_weight * gradient
+        parts["image_edge_gradient_l1"] = gradient
+    return total, parts
 
 
 def first_difference_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

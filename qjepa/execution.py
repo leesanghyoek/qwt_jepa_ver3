@@ -100,4 +100,6 @@ class RestorationForward(nn.Module):
         return {"image": result.image, "imu_normalized": result.imu_normalized,
                 "imu_physical": result.imu_physical,
                 "image_coefficients": result.image_coefficients,
-                "imu_coefficients": result.imu_coefficients}
+                "imu_coefficients": result.imu_coefficients,
+                # Only tensors cross DataParallel's gather, so parts are flattened in.
+                **(result.image_parts or {})}

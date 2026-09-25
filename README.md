@@ -8,14 +8,16 @@ commit, rồi chạy lần lượt các cell.
 Pipeline hai giai đoạn. **Phase 1**: JEPA học latent — encoder đọc ảnh + IMU
 **nhiễu** và học dự đoán latent mà teacher EMA tạo từ bản **sạch**, kèm
 variance/covariance chống collapse, một decoder neo và số hạng Jacobian. **Phase 2**:
-backbone đóng băng, chỉ train decoder khôi phục — ResNet trên pixel cho ảnh,
-decoder hệ số Haar cho IMU.
+backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decoder **tách màu và
+đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
+IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p7** (`configs/kaggle_tartanair_v2.yaml`, OUT
-`outputs/p7_resnet`): phase 1 **dùng lại** checkpoint của p5 (5.000 update, neo 0,45,
-detail 2,0, Jacobian tỉ số 0,05); phase 2 5.000 update với **decoder ảnh ResNet trên
-pixel**, loss chi tiết chấm trên ảnh khôi phục (L1 hệ số · 2,0, energy · 1,0), IMU
-giữ decoder hệ số với skip có cổng, sai phân bậc một IMU · 2,0.
+Run Kaggle hiện tại là **p8** (`configs/kaggle_tartanair_v2.yaml`, OUT
+`outputs/p8_color_edge`): phase 1 **dùng lại** checkpoint của p5 (5.000 update, neo
+0,45, detail 2,0, Jacobian tỉ số 0,05); phase 2 5.000 update với **decoder tách màu +
+đường nét**, loss màu và loss đường nét riêng, cộng loss toàn ảnh chấm trên ảnh khôi
+phục (L1 hệ số · 2,0, energy · 1,0); IMU giữ decoder hệ số với skip có cổng, sai phân
+bậc một IMU · 2,0.
 
 ## Tài liệu
 
@@ -44,12 +46,12 @@ Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng địn
 | **Blur ảnh** | bốc ngẫu nhiên, độc lập với IMU | **giữ nguyên** (quyết định 23/09), nhưng đường nối IMU đã dựng xong và bật được bằng `motion_from_imu: true` | `tests/test_imu_motion_blur.py` |
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
 | **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
-| **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **ResNet trên pixel**: ảnh mờ ở độ phân giải đầy đủ (skip) + latent JEPA → phần residual cộng vào ảnh mờ (`image_decoder: resnet_pixel`); tái tạo đúng chỗ nhiều đường nét hơn (0,309 → 0,359) | `tests/test_resnet_decoder.py` |
+| **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **Tách màu + đường nét** (`image_decoder: split_color_edge`): màu ở 128×128, đường nét trên Y ở 256×256, ghép lại; đường nét đúng chỗ 0,309 → 0,465 (ResNet một khối: 0,360) | `tests/test_color_edge_decoder.py` |
 
 **Phase 1 nào dùng lại được.** Đổi QWT (db4 → Hilbert) là đứt gãy thật:
 `model.image_transform` nằm trong configuration hash, nên checkpoint thời db4 không
 dùng được. Từ p5 trở đi phase 1 không đổi (hash `ef8ef433`); ba thay đổi sau đó — loss
-chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7 dùng lại phase 1 của p5.
+chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7/p8 dùng lại phase 1 của p5.
 
 **Kiểm tra trước khi train:**
 
@@ -61,11 +63,11 @@ python3 tools/design_hilbert_pair.py --orders 4 6 7 8
 env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/ -q
 ```
 
-**Ablation có sẵn, không cần sửa code:** `phase2.image_decoder: qwt_coefficients`
-quay về decoder ảnh hệ số; `model.image_transform: qwt_dualtree_db4` quay về
+**Ablation có sẵn, không cần sửa code:** `phase2.image_decoder: resnet_pixel` dùng
+ResNet một khối (p7), `qwt_coefficients` quay về decoder ảnh hệ số; `model.image_transform: qwt_dualtree_db4` quay về
 transform cũ; `corruption.image.motion_from_imu: true` nối blur với IMU (khi đó chạy
 `tools/imu_blur_axis_check.py` để xác nhận hình học gyro→camera). Mặc định: QWT
-Hilbert, blur do camera độc lập với nhiễu IMU, decoder ảnh ResNet.
+Hilbert, blur do camera độc lập với nhiễu IMU, decoder ảnh tách màu + đường nét.
 
 ## Vì sao ảnh vẫn mờ, và vì sao p5 ra sọc
 
@@ -100,11 +102,57 @@ Bịt lỗ hổng mà vẫn giữ modulus + energy thì sọc tăng 9 lần. Ch�
 được pha, và với nó thì energy không mua được sọc. **Năng lượng cạnh thật ở cả năm
 nhánh đều bằng nhau (0,14× ảnh clean)**: với decoder hệ số, không số hạng mean/moment
 nào ở đây làm ảnh nét thật. Thứ tiếp theo đo được là **kiến trúc decoder** — xem
-[Decoder ảnh ResNet](#decoder-ảnh-resnet-p7).
+[Decoder ảnh ResNet](#decoder-ảnh-resnet-p7) và
+[Tách màu và đường nét](#decoder-ảnh-tách-màu-và-đường-nét-p8).
 
 Chỉ đổi phase 2, nên `configuration_hash` phase 1 không đổi và checkpoint phase 1
 dùng lại được (`REUSE_PHASE1_FROM` trong Cell 4 của notebook). Báo cáo train
 (`tools/training_report.py`) giờ in năng lượng cạnh/sọc và tự cảnh báo khi sọc > 1,5×.
+
+## Decoder ảnh tách màu và đường nét (p8)
+
+Ý tưởng: tách ảnh thành **màu** và **đường nét**, khôi phục riêng, rồi ghép lại. Mắt
+người thấy độ nét gần như chỉ qua **độ sáng Y**; màu (Cb, Cr) cần độ phân giải thấp hơn
+nhiều — JPEG cũng lưu màu ở nửa độ phân giải. Mã: `qjepa/models/color_edge.py`,
+`SplitColorEdgeDecoder` trong `qjepa/models/decoders.py`.
+
+- **Nhánh màu** (128×128, 135 K tham số): ảnh mờ trung bình 2×2 + latent → ảnh nền màu,
+  và từ đó **độ sáng nền** (Y trung bình 8×8, tức chỉ chu kỳ ≥ 16 px, không có cạnh).
+  Học bằng L1 trên Cb, Cr và độ sáng nền: với màu, đáp án "trung bình" của L1 chính là
+  màu đúng.
+- **Nhánh đường nét** (256×256, 651 K tham số): **kênh sáng Y** của ảnh mờ + độ sáng nền
+  dự đoán (không truyền gradient ngược, để loss đường nét không kéo nhánh màu) + latent →
+  **chi tiết Y**, tức mọi cạnh. Cấu trúc giống ResNet p7 nhưng 1 kênh vào đường nét, 6 khối.
+  Học bằng L1 trên chi tiết Y, cộng L1 **độ dốc cạnh** của Y.
+- **Ghép**: màu lấy từ ảnh nền; độ sáng = độ sáng nền + chi tiết. Cộng **cùng một số**
+  vào R, G, B thì chỉ Y đổi còn Cb, Cr giữ nguyên (trọng số Y cộng lại bằng 1), nên nhánh
+  đường nét **không thể làm lệch màu** (`tests/test_color_edge_decoder.py`).
+
+Độ phân giải của màu được **đo** chứ không chọn tay: ghép lại từ phần đường nét hoàn
+hảo, màu ở 128×128 giới hạn ảnh ở **34,9 dB**, 64×64 ở 31,9 dB, 32×32 ở 30,0 dB.
+
+A/B cục bộ: cùng phase 1, cùng 600 update, cùng loss toàn ảnh, **cùng số tham số** (0,79 M
+so với 0,80 M), 32 frame valid kịch bản full:
+
+| decoder ảnh | PSNR | SSIM | đường nét **đúng chỗ** (4–16 px) | sai số dải nét | chi tiết mịn (2–4 px) | sọc | sai số màu |
+|---|---|---|---|---|---|---|---|
+| input (không làm gì) | 11,13 | 0,501 | 0,285 | 0,546 | 0,104 | 0,17 | 0,0365 |
+| ResNet một khối (p7) | 16,06 | 0,573 | 0,360 | 0,464 | 0,107 | 0,17 | 0,0281 |
+| tách, chỉ L1 | 16,28 | 0,610 | 0,445 | 0,402 | 0,109 | 0,18 | 0,0279 |
+| **tách + độ dốc cạnh** (recipe) | **16,32** | **0,616** | **0,465** | **0,389** | 0,107 | 0,16 | 0,0279 |
+
+Đọc bảng cho đúng:
+
+- **Đường nét tăng rõ**: 0,360 → 0,465 phần nội dung cạnh của ảnh sạch được tái tạo đúng
+  chỗ, sai số dải cạnh giảm 16%, và PSNR, SSIM cùng tăng — không có đánh đổi.
+- **Màu không tốt hơn**: sai số màu 0,0281 → 0,0279, trong mức nhiễu. Lợi ích "màu ổn
+  định" mà thiết kế nhắm tới **không** hiện ra ở phép đo này; phần được là đường nét.
+- **Chi tiết mịn nhất** (chu kỳ 2–4 px) vẫn gần bằng ảnh đầu vào ở mọi nhánh: phần đó đã
+  mất trong ảnh mờ và không decoder nào ở đây lấy lại được.
+- Latent JEPA gánh khoảng một phần ba kết quả ở cả hai kiến trúc: đặt `ZI/ZU = 0` thì sai
+  số tăng 32% (ResNet) và 37–38% (tách).
+- Mỗi nhánh chạy một lần, 600 update, phase 1 chỉ 40 update. Không tách được phần nào
+  của lợi ích đến từ việc tách kênh, phần nào từ loss riêng của nhánh đường nét.
 
 ## Decoder ảnh ResNet (p7)
 
@@ -160,9 +208,9 @@ flowchart LR
     BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
     Z["<b>②</b> latent JEPA<br/>ZI · ZU"]
     L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
-    RN["<b>③ ResNet</b> · phase 2<br/>ảnh mờ + ZI → Δ"]
+    RN["<b>③ Tách màu + đường nét</b> · phase 2<br/>màu 128² · đường nét Y 256²<br/>rồi ghép lại"]
     DU["decoder IMU<br/>phase 2"]
-    RI["<b>Ảnh phục hồi</b><br/>= ảnh mờ + Δ"]
+    RI["<b>Ảnh phục hồi</b>"]
     RU["<b>IMU phục hồi</b>"]
     CL -- ảnh --> CAM --> XB
     CL -- IMU --> ENV --> UN
@@ -199,11 +247,12 @@ của lần train đầu tiên. Vẫn không có đường pixel-space trong pha
 (`reconstruction_loss_weight: 0.0`).
 
 Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normalizer, khởi
-tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó. Ảnh được khôi phục bằng
-**ResNet** ③: mũi tên đậm là skip đưa chính ảnh mờ 256×256 vào ResNet (cho biết
-đường nét nằm ở đâu), còn `ZI` là đặc trưng JEPA học ở phase 1 (cho biết ảnh sạch
-nên trông thế nào). ResNet xuất phần hiệu chỉnh `Δ` cộng vào ảnh mờ. IMU dùng decoder
-hệ số Haar. Chi tiết từng lớp ở sơ đồ 3 bên dưới.
+tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó. Ảnh được khôi phục bởi
+decoder **tách màu và đường nét** ③: mũi tên đậm là skip đưa chính ảnh mờ 256×256 vào
+(cho biết đường nét nằm ở đâu), còn `ZI` là đặc trưng JEPA học ở phase 1 (cho biết ảnh
+sạch nên trông thế nào). Nhánh màu khôi phục màu và độ sáng nền ở 128×128, nhánh đường
+nét khôi phục mọi cạnh của kênh sáng Y ở 256×256, rồi hai phần được ghép lại. IMU dùng
+decoder hệ số Haar. Chi tiết ở sơ đồ 3 bên dưới.
 
 ## Kiến trúc chi tiết
 
@@ -291,52 +340,65 @@ tối thiểu hoá gain đó, tức phạt co đẳng hướng — bảo encoder
 thứ*, kéo thẳng về collapse. Tỉ số hai gain thì **không thứ nguyên**: collapse
 đưa cả hai về 0 và tỉ số đứng yên, nên nó nâng trọng số lên được thật.
 
-#### 3. Phase 2 — ResNet khôi phục ảnh, backbone đóng băng
+#### 3. Phase 2 — tách màu và đường nét, backbone đóng băng
 
 ```mermaid
 flowchart TB
-    CI["<b>Ci</b> · hệ số QWT của ảnh mờ<br/>48 × 128 × 128"]
-    SB["QWT synthesis<br/>tái tạo hoàn hảo"]
-    IB["<b>Ảnh mờ</b> · 3 × 256 × 256"]
-    ZI["<b>ZI</b> · latent JEPA<br/>128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
-    subgraph RES["<b>ResNet khôi phục ảnh</b> · 0,80 M tham số"]
+    IB["<b>Ảnh mờ</b> · 3 × 256 × 256<br/>(QWT synthesis của Ci, tái tạo hoàn hảo)"]
+    ZI["<b>ZI</b> · latent JEPA · 128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
+    subgraph COL["<b>① Nhánh MÀU</b> · 128 × 128 · 0,14 M tham số"]
         direction TB
-        RH["<b>head</b> conv 3×3<br/>32 × 256 × 256"]
-        RD["<b>down</b> conv 4×4 stride 2<br/>64 × 128 × 128"]
-        RL["<b>latent</b> conv 1×1 + upsample<br/>64 × 128 × 128"]
-        RF["<b>fuse</b> nối + conv 3×3<br/>64 × 128 × 128"]
-        RT["<b>8 khối residual</b><br/>conv–ReLU–conv + identity<br/>64 × 128 × 128"]
-        RU["<b>up</b> conv + pixel shuffle ×2<br/>32 × 256 × 256"]
-        RS["<b>tail</b> nối với head<br/>conv 3×3 → conv 3×3 <b>zero-init</b><br/>Δ = 3 × 256 × 256"]
-        RH --> RD --> RF
-        RL --> RF
-        RF --> RT --> RU --> RS
-        RH -. "skip U-Net" .-> RS
+        CD["trung bình 2×2<br/>3 × 128 × 128"]
+        CN["conv 3×3 + latent conv 1×1<br/>nối → 6 khối residual · 32 kênh<br/>conv cuối <b>zero-init</b>"]
+        CB["<b>ảnh nền màu</b><br/>3 × 128 × 128 → phóng ×2"]
+        CL["<b>độ sáng nền</b> = Y của ảnh nền<br/>trung bình 8×8 → phóng lại<br/>(chu kỳ ≥ 16 px, không có cạnh)"]
+        CD --> CN --> CB --> CL
     end
-    PI(("＋"))
-    OI["<b>Ảnh phục hồi</b> = ảnh mờ + Δ<br/>3 × 256 × 256"]
-    AI["QWT analysis<br/>loss chi tiết chấm trên ảnh"]
-    L1(["<b>Loss ảnh</b><br/>L1 pixel<br/>+ L1 hệ số chi tiết LH/HL/HH · 2,0<br/>+ khớp năng lượng đường nét · 1,0"])
-    CI --> SB --> IB --> RH
-    ZI --> RL
-    RS --> PI --> OI --> AI --> L1
-    IB == "không qua trọng số nào" ==> PI
+    subgraph EDG["<b>② Nhánh ĐƯỜNG NÉT</b> · 256 × 256 · kênh sáng Y · 0,65 M tham số"]
+        direction TB
+        EY["<b>Y ảnh mờ</b> · 1 × 256 × 256<br/>+ độ sáng nền (không truyền gradient ngược)"]
+        EN["ResNet: head 256² → 6 khối residual ở 128²<br/>(latent trộn vào) → pixel shuffle → skip U-Net<br/>conv cuối <b>zero-init</b>"]
+        ED["<b>chi tiết đường nét</b> · 1 × 256 × 256<br/>= mọi cạnh của kênh sáng"]
+        EY --> EN --> ED
+    end
+    CMP{{"<b>③ Ghép</b><br/>màu (Cb, Cr) ← ảnh nền<br/>độ sáng Y ← độ sáng nền + chi tiết<br/>cộng CÙNG một số vào R, G, B ⇒ màu không đổi"}}
+    OUT["<b>Ảnh phục hồi</b> · 3 × 256 × 256"]
+    LC(["<b>Loss màu</b> · L1<br/>Cb, Cr của ảnh nền + độ sáng nền<br/>so với cùng phần đó của ảnh sạch"])
+    LE(["<b>Loss đường nét</b> · L1<br/>chi tiết Y so với chi tiết Y của ảnh sạch<br/>(+ độ dốc cạnh, tuỳ chọn)"])
+    LA(["<b>Loss toàn ảnh</b><br/>L1 pixel + L1 hệ số QWT chi tiết · 2,0<br/>+ khớp năng lượng · 1,0"])
+    IB --> CD
+    IB --> EY
+    ZI --> CN
+    ZI --> EN
+    CL -. "biết ảnh sạch sáng cỡ nào" .-> EY
+    CB --> CMP
+    CL --> CMP
+    ED --> CMP
+    CMP --> OUT --> LA
+    CB -.-> LC
+    CL -.-> LC
+    ED -.-> LE
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
-    classDef p2 fill:#e8f5e9,stroke:#43a047,color:#1a1a1a
+    classDef col fill:#fff3e0,stroke:#ef6c00,color:#1a1a1a
+    classDef edg fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
+    class IB tf
     class ZI lat
-    class CI,SB,IB,AI tf
-    class RH,RD,RL,RF,RT,RU,RS,PI,OI p2
-    class L1 loss
-    style RES fill:#f1f8e9,stroke:#2e7d32,stroke-width:3px
+    class CD,CN,CB,CL col
+    class EY,EN,ED edg
+    class CMP,OUT tf
+    class LC,LE,LA loss
+    style COL fill:#fffaf2,stroke:#ef6c00,stroke-width:3px
+    style EDG fill:#f4fbf4,stroke:#2e7d32,stroke-width:3px
 ```
 
-Ảnh mờ cho biết **đường nét nằm ở đâu** (đi vào `head` ở 256×256 và vòng qua skip
-U-Net tới `tail`); `ZI` cho biết **ảnh sạch nên trông thế nào** (trộn vào thân ở
-128×128). Conv cuối zero-init nên trước khi học, `Δ = 0` và ảnh phục hồi đúng bằng
-ảnh mờ. Mũi tên đậm là đường **không đi qua trọng số nào**: ảnh mờ cộng thẳng vào
-đầu ra.
+Nhánh màu chạy trước và cho nhánh đường nét biết **ảnh sạch sáng cỡ nào** (qua độ sáng
+nền, không truyền gradient ngược), để nhánh đường nét vẽ cạnh đúng cường độ. Hai conv
+cuối đều zero-init: trước khi học, đầu ra có đúng kênh sáng của ảnh mờ và màu của ảnh
+mờ ở 128×128. Nhánh đường nét dùng cùng cấu trúc ResNet của p7 (head 256², thân ở 128²
+có latent trộn vào, pixel shuffle, skip U-Net), chỉ khác 2 kênh vào (Y + độ sáng nền), 1
+kênh ra và 6 khối residual.
 
 #### 4. Phase 2 — decoder IMU, backbone đóng băng
 
@@ -463,8 +525,8 @@ Hai dòng này giải thích phần lớn kết quả đo được:
 
 - `ZI` là `16×16`, tức **mỗi ô latent phải mô tả một khối 16×16 pixel**. Đó là trần
   của những gì latent tự mang được. Decoder hệ số cũ chỉ chạm tới ảnh qua latent nên
-  dừng ở trần này; ResNet trên pixel đọc thẳng ảnh mờ ở 256×256 nên vượt được
-  (đường nét đúng chỗ 0,309 → 0,359). Cách khác là latent `32×32` (`encoders.py`,
+  dừng ở trần này; decoder trên pixel đọc thẳng ảnh mờ ở 256×256 nên vượt được
+  (đường nét đúng chỗ 0,309 → 0,360 với ResNet, 0,465 với tách màu + đường nét). Cách khác là latent `32×32` (`encoders.py`,
   đổi `stride=2` của stage cuối thành `1`), nhưng cách đó phải train lại phase 1.
 - `ZU` **không hề nén** — nó còn nhiều số hơn chính tín hiệu IMU. Đó là lý do
   metric IMU luôn tốt hơn metric ảnh: bài toán IMU không bị bóp cổ chai.
@@ -522,7 +584,18 @@ con số như vậy không thể đọc ra từ khối Jacobian cũ, vì nó ch�
 Backbone (transform + 2 encoder + fusion) **đóng băng ở chế độ eval**. Chỉ hai
 decoder được cập nhật.
 
-**Decoder ảnh — ResNet trên pixel** (`image_decoder: resnet_pixel`, 799.811 tham số):
+**Decoder ảnh — tách màu + đường nét** (`image_decoder: split_color_edge`, 786.564 tham số):
+
+| Bước | Nhánh màu (135.331) | Nhánh đường nét (651.233) |
+|---|---|---|
+| vào | ảnh mờ trung bình 2×2 `[3, 128, 128]` + `ZI` | Y ảnh mờ + độ sáng nền `[2, 256, 256]` + `ZI` |
+| đầu | conv 3×3 + ReLU `[32, 128, 128]` | `head` conv 3×3 `[32, 256, 256]` → `down` stride 2 `[64, 128, 128]` |
+| latent | conv 1×1 + upsample `[32, 128, 128]` | conv 1×1 + upsample `[64, 128, 128]` |
+| thân | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | nối + conv 3×3, 6 khối residual `[64, 128, 128]` |
+| ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | `up` pixel shuffle, skip U-Net, conv **zero-init** → chi tiết Y `[1, 256, 256]` |
+| ghép | màu (Cb, Cr) = của ảnh nền | Y = độ sáng nền (Y ảnh nền, trung bình 8×8) + chi tiết |
+
+**Decoder ảnh ResNet một khối** (`image_decoder: resnet_pixel`, p7, 799.811 tham số):
 
 | Bước | Shape |
 |---|---|
@@ -586,9 +659,12 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | predictor ảnh | 66.176 | 1, rồi vứt |
 | predictor IMU | 66.176 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 — ResNet pixel | 799.811 | 2 |
+| decoder ảnh phase 2 — tách màu + đường nét | 786.564 | 2 |
+| ↳ nhánh màu | 135.331 | 2 |
+| ↳ nhánh đường nét | 651.233 | 2 |
 | decoder IMU phase 2 | 358.012 | 2 |
-| **decoder phase 2 (tổng)** | **1.157.823** | 2 |
+| **decoder phase 2 (tổng)** | **1.144.576** | 2 |
+| *(decoder ảnh ResNet một khối `resnet_pixel`, nếu chọn)* | *799.811* | 2 |
 | *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |
 
 Decoder neo giữ kiến trúc hệ số, không skip, không residual, vì skip và residual
@@ -603,8 +679,9 @@ riêng (`decoder_initialization_seed`).
 
 ## Hai quyết định thiết kế quan trọng
 
-**Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** ResNet ảnh cộng
-`Δ` vào chính ảnh mờ, conv cuối zero-init. Với
+**Decoder phase 2 dự đoán hiệu chỉnh, không dự đoán thay thế.** Cả hai nhánh của
+decoder ảnh cộng phần hiệu chỉnh vào chính ảnh mờ (ảnh nền trung bình, chi tiết Y của
+ảnh mờ), conv cuối zero-init. Với
 `input_coefficient_residual: true`, đầu ra là `C_out = C_in + Δ(Z)` và head được
 khởi tạo bằng 0, nên tại update 0 model trả lại **đúng** input. Đó là một sàn mà
 model không thể tụt xuống dưới, và `Δ` chính là phần đóng góp đo được của latent:
@@ -627,8 +704,11 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/models/pipeline.py`: hai wrapper phase riêng. `LatentPretrainingModel`
   chỉ nhận decoder neo khi `phase1.decoder_enabled` bật, và decoder đó không đi
   sang phase 2; `RestorationSystem` giữ backbone ở eval/frozen.
-- `qjepa/models/decoders.py`: `PixelResNetDecoder` cho ảnh (ảnh mờ + `ZI` → residual
-  trên pixel, khi `image_decoder: resnet_pixel`); decoder hệ số nhận `ZI/ZU`, và khi
+- `qjepa/models/color_edge.py`: tách ảnh thành màu (Cb, Cr), độ sáng nền và chi tiết
+  Y, ghép lại; loss độ dốc cạnh và thước đo sai số màu.
+- `qjepa/models/decoders.py`: `SplitColorEdgeDecoder` (nhánh màu `ColorBranch` + nhánh
+  đường nét) cho ảnh khi `image_decoder: split_color_edge`; `PixelResNetDecoder` (ResNet
+  một khối, cũng là nhánh đường nét) khi `resnet_pixel`; decoder hệ số nhận `ZI/ZU`, và khi
   `encoder_skips` bật thì nhận
   thêm ba tầng trung gian của encoder qua `SkipMerge` **có cổng** — cổng sinh từ
   đường latent nên latent quyết định cho bao nhiêu skip đi qua ở từng vị trí.
@@ -682,8 +762,8 @@ residual sẽ để nó thoả mãn neo bằng `Δ ≈ 0` mà không ép đượ
 - `qjepa/execution.py`: chọn thiết bị và bọc forward bằng `DataParallel` khi có
   hai GPU; chỉ dict tensor đi qua ranh giới gather nên loss vẫn thấy cả batch.
 - `configs/pipeline_v3.yaml`: recipe chính RGB 256×256, IMU 128×6.
-- `configs/kaggle_tartanair_v2.yaml`: recipe Kaggle p7, kế thừa `pipeline_v3.yaml`
-  (decoder ảnh ResNet, loss chi tiết trên ảnh khôi phục); `imu_variation_weight: 2.0`,
+- `configs/kaggle_tartanair_v2.yaml`: recipe Kaggle p8, kế thừa `pipeline_v3.yaml`
+  (decoder ảnh tách màu + đường nét, loss chi tiết trên ảnh khôi phục); `imu_variation_weight: 2.0`,
   skip bật cho IMU. Notebook ghi đè số update phase 1 thành 5.000 và dùng lại phase 1
   của p5.
 
@@ -829,7 +909,7 @@ Mỗi checkpoint in một dòng so sánh trực tiếp với baseline "không l�
 validation update=250 | PSNR 11.43 vs 11.40 | SSIM 0.289 vs 0.289 | accel 0.612 vs 0.613 | VUOT baseline
 ```
 
-Vì lớp cuối zero-init (conv cuối của ResNet ảnh, head của decoder hệ số), trước
+Vì lớp cuối zero-init (conv cuối của hai nhánh ảnh, head của decoder hệ số), trước
 update đầu tiên đầu ra đúng bằng đầu vào; dòng validate đầu tiên phải ít nhất ngang
 baseline. Nếu nó tệ hơn hẳn thì residual chưa thực sự bật — kiểm
 `phase2.image_decoder`, `phase2.input_coefficient_residual` và
@@ -888,14 +968,16 @@ Run Kaggle trên TartanAir V2, validation, cùng baseline "đưa thẳng input r
 | p4 | + skip độ phân giải đầy đủ | 21,87 | 0,735 | chi tiết không cải thiện (sai số chi tiết giảm 14,4% so với 15,2%) |
 | p5 | + loss modulus `\|q\|` | 22,02 | 0,740 | **ra sọc**, vẫn mờ — xem mục sọc ở trên |
 | p6 | loss chấm trên ảnh, bỏ modulus | — | — | không chạy: A/B cục bộ cho thấy ResNet tốt hơn |
-| **p7** | **decoder ảnh ResNet trên pixel** | *đang chạy* | | |
+| p7 | decoder ảnh ResNet trên pixel | — | — | chưa có báo cáo; người xem nhận xét ảnh vẫn chưa nét |
+| **p8** | **decoder tách màu + đường nét** | *chưa chạy* | | |
 
-A/B cục bộ phía sau p7 (cùng phase 1, 600 update) nằm ở mục
-[Decoder ảnh ResNet](#decoder-ảnh-resnet-p7): đường nét tái tạo đúng chỗ 0,309 → 0,359.
-Ảnh đầu vào bị hỏng rất nặng, nên ngay cả ResNet cũng chỉ lấy lại được một phần đường
-nét của ảnh sạch.
+A/B cục bộ phía sau p7 và p8 (cùng phase 1, 600 update) nằm ở mục
+[Tách màu và đường nét](#decoder-ảnh-tách-màu-và-đường-nét-p8): đường nét tái tạo đúng
+chỗ 0,309 (decoder hệ số) → 0,360 (ResNet) → 0,465 (tách). Ảnh đầu vào bị hỏng rất
+nặng, nên kể cả bản tách cũng chỉ lấy lại được chưa đến một nửa đường nét của ảnh
+sạch, và gần như không lấy lại được chi tiết mịn nhất.
 
-ResNet đọc thẳng ảnh mờ, nên một phần độ nét đến từ chính ảnh đầu vào chứ không
+Decoder ảnh đọc thẳng ảnh mờ, nên một phần độ nét đến từ chính ảnh đầu vào chứ không
 thuần từ latent. Phần latent JEPA đóng góp được đo bằng `delta_report.py
 --ablate-latent` (Cell 14 của notebook): đặt `ZI/ZU = 0` rồi so sai số.
 

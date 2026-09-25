@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from ..data.normalize import ImuNormalizer
 from .backbone import LatentBatch, MultimodalBackbone
-from .decoders import LatentDecoders
+from .decoders import PIXEL_IMAGE_DECODERS, LatentDecoders
 from .predictors import LatentPredictor, image_tokens, imu_tokens
 from .teachers import EMATeachers
 
@@ -82,6 +82,8 @@ class RestoredBatch:
     imu_physical: torch.Tensor
     image_coefficients: torch.Tensor
     imu_coefficients: torch.Tensor
+    # Intermediate pieces some image decoders expose for their own loss terms.
+    image_parts: dict[str, torch.Tensor] | None = None
 
 
 class RestorationSystem(nn.Module):
@@ -125,11 +127,14 @@ class RestorationSystem(nn.Module):
 
     def decode(self, latent: LatentBatch) -> RestoredBatch:
         transform = self.backbone.image_transform
-        if self.decoders.image_decoder == "resnet_pixel":
+        parts = None
+        if self.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
             # The QWT reconstructs perfectly, so this IS the blurry input image;
             # decode(latent) keeps its signature for the ZI-ablation tools.
             blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
             image = self.decoders.image(latent.ZI, blurry)
+            if isinstance(image, tuple):
+                image, parts = image
             # Coefficients OF the image, so nothing downstream can score energy
             # that synthesis would throw away.
             image_coeff, _ = transform.analysis(image)
@@ -147,6 +152,7 @@ class RestorationSystem(nn.Module):
             imu_physical=self.normalizer.denormalize(imu_norm),
             image_coefficients=image_coeff,
             imu_coefficients=imu_coeff,
+            image_parts=parts,
         )
 
     def forward(

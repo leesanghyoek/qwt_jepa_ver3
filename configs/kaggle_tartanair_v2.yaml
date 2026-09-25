@@ -39,7 +39,7 @@ experiment_name: qwt_jepa_sharp_smooth_kaggle
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p7_resnet
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p8_color_edge
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   validation_batches: 32
@@ -81,5 +81,5 @@ phase2:
   # phan synthesis vut di — loss giam ma anh khong doi. Chi doi phase 2 -> dung
   # lai phase 1 cua p5.
   image_detail_source: restored_image
-  # p7: decoder anh la ResNet tren pixel (ke thua image_decoder: resnet_pixel tu
-  # pipeline_v3.yaml). Van chi doi phase 2 -> dung lai phase 1 cua p5.
+  # p8: decoder anh tach MAU va DUONG NET (ke thua image_decoder: split_color_edge
+  # tu pipeline_v3.yaml). Van chi doi phase 2 -> dung lai phase 1 cua p5.

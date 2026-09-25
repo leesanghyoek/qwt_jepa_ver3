@@ -51,6 +51,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return config
 
 
+SPLIT_INTEGER_KEYS = ("split_color_width", "split_color_blocks", "split_edge_width",
+                      "split_edge_blocks", "split_color_scale", "split_illumination_scale")
+SPLIT_WEIGHT_KEYS = ("split_color_weight", "split_edge_weight", "split_gradient_weight")
+
+
 def validate_config(config: dict[str, Any]) -> None:
     if config.get("pipeline_version") != 3:
         raise ValueError("pipeline_version must be exactly 3")
@@ -157,8 +162,21 @@ def validate_config(config: dict[str, Any]) -> None:
     if phase2.get("image_detail_source", "decoder_coefficients") not in ("decoder_coefficients", "restored_image"):
         raise ValueError("phase2.image_detail_source must be decoder_coefficients or restored_image")
     image_decoder = phase2.get("image_decoder", "qwt_coefficients")
-    if image_decoder not in ("qwt_coefficients", "resnet_pixel"):
-        raise ValueError("phase2.image_decoder must be qwt_coefficients or resnet_pixel")
+    if image_decoder not in ("qwt_coefficients", "resnet_pixel", "split_color_edge"):
+        raise ValueError("phase2.image_decoder must be qwt_coefficients, resnet_pixel or split_color_edge")
+    if image_decoder == "split_color_edge":
+        # Explicit, like skip_gating: the hash must record what was trained.
+        for key in SPLIT_INTEGER_KEYS:
+            value = phase2.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"phase2.image_decoder split_color_edge needs a positive integer phase2.{key}")
+        for key in SPLIT_WEIGHT_KEYS:
+            value = phase2.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"phase2.image_decoder split_color_edge needs a nonnegative phase2.{key}")
+        for side in data["image_size"]:
+            if side % phase2["split_color_scale"] or side % phase2["split_illumination_scale"]:
+                raise ValueError("phase2 split scales must divide the image sides")
     if image_decoder == "resnet_pixel":
         # Explicit, like skip_gating: the hash must record the trained width/depth.
         for key in ("image_resnet_width", "image_resnet_blocks"):
@@ -291,6 +309,14 @@ def build_decoders(
         image_decoder=image_decoder,
         resnet_width=int(config["phase2"].get("image_resnet_width", 64)),
         resnet_blocks=int(config["phase2"].get("image_resnet_blocks", 8)),
+        split={
+            "color_width": int(config["phase2"].get("split_color_width", 32)),
+            "color_blocks": int(config["phase2"].get("split_color_blocks", 6)),
+            "edge_width": int(config["phase2"].get("split_edge_width", 64)),
+            "edge_blocks": int(config["phase2"].get("split_edge_blocks", 6)),
+            "color_scale": int(config["phase2"].get("split_color_scale", 2)),
+            "illumination_scale": int(config["phase2"].get("split_illumination_scale", 8)),
+        },
     )
 
 
