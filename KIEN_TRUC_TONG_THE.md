@@ -12,11 +12,11 @@
    này, cùng VICReg, decoder neo và **Jacobian**, dùng để train backbone. Jacobian ép encoder nhạy
    với đường nét và bỏ qua nhiễu.
 3. **③ Phase 2 (xanh lá).** Backbone **đóng băng**. Decoder ảnh nhận ZI và **chính ảnh mờ**
-   (mũi tên skip), gồm hai nhánh, mỗi nhánh là một khối **CNN phễu–loa**: **phễu** thu nhỏ ÷2 mỗi
-   tầng (đặc trưng nông → sâu), **đáy** 16×16 nhận **ZI**, **loa** phóng ×2 trở lại, **skip** mang đặc
-   trưng nông sang loa. Nhánh **màu** ở 128×128, nhánh **đường nét** trên kênh sáng Y ở 256×256, rồi
-   **ghép**. Decoder IMU nhận ZU. Recipe p8 hiện train mỗi nhánh bằng CNN một tầng; phễu–loa bật
-   bằng `split_branch_arch: unet`.
+   (mũi tên skip), gồm hai nhánh, mỗi nhánh là một **U-Net** (phễu–loa): **Encoder** thu nhỏ ÷2 mỗi
+   tầng (đặc trưng nông → sâu), **Bottleneck** 16×16 nhận **ZI**, **Decoder** phóng ×2 trở lại, **skip
+   connection** mang đặc trưng nông từ Encoder sang Decoder. Nhánh **màu** ở 128×128, nhánh **đường
+   nét** trên kênh sáng Y ở 256×256, rồi **ghép**. Decoder IMU nhận ZU. Recipe p8 hiện train mỗi nhánh
+   bằng CNN một tầng; U-Net bật bằng `split_branch_arch: unet`.
 
 | | Phase 1 | Phase 2 |
 |---|---|---|

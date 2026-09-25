@@ -72,32 +72,32 @@ fus = node(535, 280, 125, 80, 'bb', 'Fusion', ['có cổng'])
 # ---------------- latent
 zi = node(705, 205, 110, 70, 'lat', 'ZI', ['128 × 16 × 16'])
 zu = node(705, 365, 110, 70, 'lat', 'ZU', ['128 × 8'])
-# ---------------- phase 2: image decoder = two funnel-and-loudspeaker CNN blocks
-def phe_loa(x, yc, kind, title, below=False):
-    """One branch as blocks: funnel CNN -> bottom (ZI joins) -> loudspeaker CNN, skip over the top."""
+# ---------------- phase 2: image decoder = two U-Net branches (encoder / bottleneck / decoder)
+def unet_block(x, yc, kind, title, below=False):
+    """One branch as a U-Net at block level: Encoder -> Bottleneck (ZI joins) -> Decoder, skip across."""
     fill, stroke = C[kind]
-    el.append(f'<polygon points="{x},{yc - 30} {x + 92},{yc - 12} {x + 92},{yc + 12} {x},{yc + 30}" '
+    el.append(f'<polygon points="{x},{yc - 30} {x + 80},{yc - 13} {x + 80},{yc + 13} {x},{yc + 30}" '
               f'fill="{fill}" stroke="{stroke}" stroke-width="2"/>')
-    el.append(f'<polygon points="{x + 140},{yc - 12} {x + 232},{yc - 30} {x + 232},{yc + 30} {x + 140},{yc + 12}" '
+    el.append(f'<polygon points="{x + 152},{yc - 13} {x + 232},{yc - 30} {x + 232},{yc + 30} {x + 152},{yc + 13}" '
               f'fill="{fill}" stroke="{stroke}" stroke-width="2"/>')
-    el.append(f'<rect x="{x + 100}" y="{yc - 13}" width="32" height="26" rx="4" fill="{C["lat"][0]}" '
+    el.append(f'<rect x="{x + 86}" y="{yc - 13}" width="60" height="26" rx="4" fill="{C["lat"][0]}" '
               f'stroke="{C["lat"][1]}" stroke-width="2"/>')
-    text(x + 40, yc + 5, 'phễu', size=13, weight='bold', color=stroke)
-    text(x + 192, yc + 5, 'loa', size=13, weight='bold', color=stroke)
-    text(x + 116, yc + 4, 'đáy', size=10, weight='bold', color=C['lat'][1])
-    el.append(f'<path d="M {x + 92} {yc} L {x + 100} {yc}" stroke="{stroke}" stroke-width="2"/>')
-    el.append(f'<path d="M {x + 132} {yc} L {x + 140} {yc}" stroke="{stroke}" stroke-width="2"/>')
+    text(x + 36, yc + 5, 'Encoder', size=12, weight='bold', color=stroke)
+    text(x + 196, yc + 5, 'Decoder', size=12, weight='bold', color=stroke)
+    text(x + 116, yc + 4, 'Bottleneck', size=10, weight='bold', color=C['lat'][1])
+    el.append(f'<path d="M {x + 80} {yc} L {x + 86} {yc}" stroke="{stroke}" stroke-width="2"/>')
+    el.append(f'<path d="M {x + 146} {yc} L {x + 152} {yc}" stroke="{stroke}" stroke-width="2"/>')
     k = 1 if below else -1                                      # skip arc and title above or below
-    el.append(f'<path d="M {x + 46} {yc + 23 * k} C {x + 60} {yc + 52 * k}, {x + 172} {yc + 52 * k}, {x + 186} {yc + 23 * k}" '
+    el.append(f'<path d="M {x + 40} {yc + 24 * k} C {x + 56} {yc + 54 * k}, {x + 176} {yc + 54 * k}, {x + 192} {yc + 24 * k}" '
               f'fill="none" stroke="#90A4AE" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-90A4AE)"/>')
-    text(x + 116, yc + (52 if below else -44), 'skip', size=10, color='#78909C', style='font-style="italic"')
-    text(x + 116, yc + (70 if below else -58), title, size=13, weight='bold', color=stroke)
+    text(x + 116, yc + (53 if below else -45), 'skip connection', size=10, color='#78909C', style='font-style="italic"')
+    text(x + 116, yc + (71 if below else -59), title, size=13, weight='bold', color=stroke)
     return (x, yc - 30, 232, 60)
 
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
-colb = phe_loa(FX, 200, 'color', 'Nhánh MÀU · 128² · màu + độ sáng')
-edgb = phe_loa(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · 256² · kênh Y', below=True)
+colb = unet_block(FX, 200, 'color', 'Nhánh MÀU (U-Net) · 128²')
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT (U-Net) · 256² · Y', below=True)
 join = node(1172, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1272, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
@@ -123,7 +123,7 @@ el.append(f'<path d="M 815 240 L 845 240 L 845 260 L 878 260 A 7 7 0 0 1 892 260
           f'fill="none" stroke="#8E24AA" stroke-width="2.4"/>')
 arrow([(DX, 260), (DX, 213)], color='#8E24AA', width=2.4)
 arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
-text(966, 254, 'ZI → đáy', size=12, weight='bold', color='#8E24AA')
+text(962, 254, 'ZI → Bottleneck', size=12, weight='bold', color='#8E24AA')
 # the blurry image into the funnel of both branches
 arrow([(95, 205), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
       label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
