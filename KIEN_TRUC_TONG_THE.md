@@ -20,6 +20,15 @@
 latent ZI đi vào; loa phóng ×2 trở lại, skip mang đặc trưng gần của mỗi tầng từ phễu sang loa.
 Recipe p8 hiện train mỗi nhánh bằng CNN một tầng; phễu–loa bật bằng `split_branch_arch: unet`.
 
+## Chi tiết CNN phễu–loa
+
+![Chi tiết CNN phễu–loa](docs/phe_loa_chi_tiet.svg)
+
+Từng lớp của nhánh đường nét với shape `[kênh × cao × rộng]` và vùng nhìn của mỗi tầng: phễu đi
+từ đặc trưng nông (7 px) xuống đặc trưng sâu (đáy 16×16 nhìn 204 px, nơi latent ZI đi vào), loa đi
+ngược lên và nối skip ở mỗi tầng. Nhánh màu cùng cấu trúc ở 128×128. Vẽ lại:
+`python3 tools/draw_unet_detail.py docs/phe_loa_chi_tiet.svg`.
+
 | | Phase 1 | Phase 2 |
 |---|---|---|
 | Train | backbone 1,33 M | decoder ảnh 0,79 M + decoder IMU 0,36 M |
