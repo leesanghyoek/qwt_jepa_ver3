@@ -5,7 +5,7 @@ Usage: python3 tools/draw_architecture.py docs/kien_truc.svg
 import sys
 from xml.sax.saxutils import escape
 
-W, H = 1280, 720
+W, H = 1280, 1126
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -117,6 +117,52 @@ arrow([mid_left(pred_u), (650, 590)], label='đoán TU', lx=678, ly=582)
 arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', lx=740, ly=665)
 arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
 text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
+
+# ---------------- tried and dropped
+el.append('<line x1="20" y1="728" x2="1260" y2="728" stroke="#B0BEC5" stroke-width="1.5"/>')
+text(20, 760, 'Các phương án đã thử và bỏ', size=19, weight='bold', color='#37474F', anchor='start')
+text(290, 760, '(theo thứ tự thời gian · số đo là phép thử cục bộ hoặc run Kaggle)', size=14, color='#78909C', anchor='start')
+
+TAG = {'bb': ('BACKBONE', '#1E88E5'), 'data': ('DỮ LIỆU', '#757575'), 'dec': ('DECODER ẢNH', '#2E7D32')}
+
+def card(x, y, tag, title, lines, verdict, off=False):
+    w, h = 298, 158
+    el.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="#FFFFFF" stroke="#CFD8DC" stroke-width="1.5"/>')
+    label, colour = TAG[tag]
+    el.append(f'<rect x="{x}" y="{y}" width="{w}" height="6" rx="3" fill="{colour}"/>')
+    text(x + 14, y + 26, label, size=11, weight='bold', color=colour, anchor='start')
+    text(x + 14, y + 49, title, size=16, weight='bold', anchor='start')
+    for i, line in enumerate(lines):
+        text(x + 14, y + 72 + 19 * i, line, size=13, color='#37474F', anchor='start')
+    fill, stroke, mark = ('#FFF8E1', '#B26A00', '⏸') if off else ('#FFEBEE', '#C62828', '✗')
+    el.append(f'<rect x="{x + 10}" y="{y + h - 36}" width="{w - 20}" height="26" rx="13" fill="{fill}"/>')
+    text(x + 22, y + h - 18, f'{mark}  {verdict}', size=13, weight='bold', color=stroke, anchor='start')
+
+X = [20, 334, 648, 962]
+card(X[0], 780, 'bb', 'QWT db4 (bản cũ)',
+     ['4 cây db4 lệch 1 mẫu', 'năng lượng tần số âm 0,18:', 'không phải cặp Hilbert'],
+     'thay bằng QWT Hilbert (0,07)')
+card(X[1], 780, 'bb', 'Jacobian cũ',
+     ['phạt độ nhạy theo 1 hướng ngẫu nhiên', '⇒ encoder bớt nhạy với mọi thứ,', 'kéo về collapse (trọng số 1e-4)'],
+     'thay bằng tỉ số g_nhiễu / g_tín hiệu')
+card(X[2], 780, 'data', 'Blur tính từ gyro',
+     ['ảnh mờ = tích phân chuyển động IMU', 'đã dựng và kiểm chứng', '(tương quan ≥ 0,9998)'],
+     'tắt: giả định ảnh mờ do camera', off=True)
+card(X[3], 780, 'dec', 'Decoder hệ số QWT (p3–p6)',
+     ['ZI 16×16 → 48 hệ số QWT → synthesis', 'nét đúng chỗ 0,31; 3 biến thể', 'dừng ở cùng một mức chi tiết'],
+     'thay bằng decoder trên pixel')
+card(X[0], 948, 'dec', 'Loss modulus |q| (p5)',
+     ['khớp độ lớn chi tiết,', 'không xét đúng vị trí', '⇒ sọc chu kỳ 2 px (3,2× ảnh sạch)'],
+     'bỏ, quay về L1 hệ số')
+card(X[1], 948, 'dec', 'ResNet một khối (p7)',
+     ['ảnh mờ + ZI → Δ · 0,80 M tham số', 'nét đúng chỗ 0,36', '(decoder hệ số: 0,31)'],
+     'thay bằng tách màu + đường nét (0,47)')
+card(X[2], 948, 'dec', 'Phễu–loa U-Net',
+     ['256 → 16 → 256, ZI ở đáy · 0,79 M', 'nét 8–16 px: 0,39 so với 0,63 (p8)', 'tầng có đường nét quá ít kênh'],
+     'kém p8 ở cùng kích thước')
+card(X[3], 948, 'dec', 'GAN (PatchGAN)',
+     ['discriminator chấm', '"ảnh này trông có thật không"', 'PSNR/SSIM giảm ở run Kaggle'],
+     'bỏ theo quyết định, không dùng')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'

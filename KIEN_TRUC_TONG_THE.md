@@ -15,6 +15,10 @@
    (mũi tên skip), tách thành hai nhánh: **màu** ở 128×128 và **đường nét** trên kênh sáng Y ở
    256×256, rồi ghép lại. Decoder IMU nhận ZU.
 
+**Phía dưới hình: các phương án đã thử và bỏ** — QWT db4 cũ, Jacobian cũ, blur tính từ gyro
+(tắt), decoder hệ số QWT, loss modulus, ResNet một khối, phễu–loa U-Net, GAN. Mỗi thẻ ghi kết
+quả đo và lý do bỏ.
+
 | | Phase 1 | Phase 2 |
 |---|---|---|
 | Train | backbone 1,33 M | decoder ảnh 0,79 M + decoder IMU 0,36 M |
