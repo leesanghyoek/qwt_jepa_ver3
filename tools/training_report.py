@@ -369,6 +369,8 @@ def config_section(run: Path) -> None:
         ("corruption.image.motion_from_imu", ("corruption", "image", "motion_from_imu")),
         ("phase1.max_successful_updates", ("phase1", "max_successful_updates")),
         ("phase1.batch_size", ("phase1", "batch_size")),
+        ("phase1.covariance_pooling", ("phase1", "covariance_pooling")),
+        ("phase1.image_positions_per_update", ("phase1", "image_positions_per_update")),
         ("phase1.coefficient_reconstruction_loss_weight",
          ("phase1", "coefficient_reconstruction_loss_weight")),
         ("encoder_sensitivity.weight_max", ("encoder_sensitivity", "weight_max")),

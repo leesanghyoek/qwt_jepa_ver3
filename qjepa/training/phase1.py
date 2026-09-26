@@ -194,11 +194,15 @@ class Phase1Trainer:
             (features["ZI_clean"], image_indices),
             (features["ZU_clean"], imu_indices),
         )
+        # Absent from configs written before the key existed: they used the
+        # per-position covariance, and resuming them must keep it.
+        pooled = self.phase.get("covariance_pooling", "per_position") == "pooled"
         regularizers = [
             variance_covariance_loss(
                 dense_positions(feature, indices),
                 gamma=self.phase["variance_gamma"],
                 eps=self.phase["variance_eps"],
+                pooled_covariance=pooled,
             )
             for feature, indices in maps
         ]

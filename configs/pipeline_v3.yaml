@@ -132,9 +132,15 @@ phase1:
   jepa_weight: 1.0
   variance_weight: 1.0
   covariance_weight: 0.01
+  # Covariance 128x128 uoc tu 8 mau o tung vi tri co hang <= 7: tren dac trung
+  # hoan toan khong tuong quan no van doc ~8 (dung la 0) va tang theo std^4, nen
+  # gradient cua no chu yeu la ep dac trung nho lai, chong lai variance. Gop mau
+  # (da tru trung binh theo tung vi tri) cua moi vi tri duoc lay: san nhieu 0,13.
+  # A/B 1000 update: effective rank ZI 0,59 -> 0,77, variance loss 0,24 -> 0,15.
+  covariance_pooling: pooled
   variance_gamma: 1.0
   variance_eps: 0.0001
-  image_positions_per_update: 16
+  image_positions_per_update: 64         # 16 vi tri x 8 mau qua it cho covariance gop
   imu_positions_per_update: 8
   position_seed: 73132
   minimum_statistics_batch: 8

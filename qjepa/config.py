@@ -108,6 +108,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Phase 1 uses real batch statistics; gradient_accumulation must be 1")
     if not phase1.get("online_clean_forward_for_regularization", False):
         raise ValueError("Phase 1 requires the gradient-enabled clean online branch")
+    if phase1.get("covariance_pooling", "per_position") not in ("per_position", "pooled"):
+        raise ValueError("phase1.covariance_pooling must be per_position or pooled")
     if phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0:
         raise ValueError("Main latent training requires explicit variance and covariance losses")
     if phase1.get("jepa_weight") != 1.0 or phase1.get("precision") != "fp32":

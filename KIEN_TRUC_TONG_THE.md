@@ -21,7 +21,7 @@
 | | Phase 1 | Phase 2 |
 |---|---|---|
 | Train | backbone 1,33 M | decoder ảnh 0,79 M + decoder IMU 0,36 M |
-| Loss | JEPA · VICReg · decoder neo 0,45 · Jacobian 0,05 | L1 ảnh · chi tiết QWT · màu · đường nét · độ dốc cạnh · IMU |
+| Loss | JEPA · VICReg (covariance gộp) · decoder neo 0,45 · Jacobian 0,05 | L1 ảnh · chi tiết QWT · màu · đường nét · độ dốc cạnh · IMU |
 
 Chi tiết từng lớp: [README](README.md#kiến-trúc-chi-tiết). Vẽ lại hình:
 `python3 tools/draw_architecture.py docs/kien_truc.svg`.

@@ -12,12 +12,13 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p8** (`configs/kaggle_tartanair_v2.yaml`, OUT
-`outputs/p8_color_edge`): phase 1 **dùng lại** checkpoint của p5 (5.000 update, neo
-0,45, detail 2,0, Jacobian tỉ số 0,05); phase 2 5.000 update với **decoder tách màu +
-đường nét**, loss màu và loss đường nét riêng, cộng loss toàn ảnh chấm trên ảnh khôi
-phục (L1 hệ số · 2,0, energy · 1,0); IMU giữ decoder hệ số với skip có cổng, sai phân
-bậc một IMU · 2,0.
+Run Kaggle hiện tại là **p9** (`configs/kaggle_tartanair_v2.yaml`, OUT
+`outputs/p9_vicreg`): **train lại phase 1** (5.000 update) với covariance VICReg
+**gộp** thay cho covariance theo từng vị trí, 64 vị trí ảnh mỗi update (trước 16); neo
+0,45, detail 2,0, Jacobian tỉ số 0,05 giữ nguyên. Phase 2 giữ nguyên recipe p8 (hash
+phase 2 không đổi): 5.000 update với **decoder tách màu + đường nét**, loss màu và loss
+đường nét riêng, cộng loss toàn ảnh chấm trên ảnh khôi phục (L1 hệ số · 2,0, energy ·
+1,0); IMU giữ decoder hệ số với skip có cổng, sai phân bậc một IMU · 2,0.
 
 ## Tài liệu
 
@@ -47,11 +48,14 @@ Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng địn
 | **Jacobian** | 1 hướng Rademacher, phạt đẳng hướng, trọng số `1e-4` (trơ) | `log(g_nhiễu / g_tín hiệu)`, không thứ nguyên, trọng số `0,05` | `tests/test_sensitivity_ratio.py` |
 | **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
 | **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **Tách màu + đường nét** (`image_decoder: split_color_edge`): màu ở 128×128, đường nét trên Y ở 256×256, ghép lại; đường nét đúng chỗ 0,309 → 0,465 (ResNet một khối: 0,360) | `tests/test_color_edge_decoder.py` |
+| **Covariance VICReg (phase 1)** | ước ở từng vị trí từ 8 mẫu: ma trận 128×128 hạng ≤ 7, trên đặc trưng **không tương quan** vẫn đọc **8,2** (đúng là 0) và tăng theo std⁴, nên gradient chủ yếu ép đặc trưng nhỏ lại, chống variance | gộp mẫu (đã trừ trung bình theo vị trí) của mọi vị trí được lấy (`covariance_pooling: pooled`), 64 vị trí: sàn nhiễu **0,13**. A/B 1.000 update: effective rank ZI 0,59 → 0,77, variance loss 0,24 → 0,15; phase 2 ngắn ngang nhau | `tests/test_pooled_covariance.py` |
 
 **Phase 1 nào dùng lại được.** Đổi QWT (db4 → Hilbert) là đứt gãy thật:
 `model.image_transform` nằm trong configuration hash, nên checkpoint thời db4 không
 dùng được. Từ p5 trở đi phase 1 không đổi (hash `ef8ef433`); ba thay đổi sau đó — loss
-chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7/p8 dùng lại phase 1 của p5.
+chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7/p8 dùng lại phase 1 của p5. p9 đổi
+covariance VICReg nên hash phase 1 đổi (`4389b3c6`): p9 train lại cả hai phase. Run sau
+chỉ đổi phase 2 thì dùng lại phase 1 của p9.
 
 **Kiểm tra trước khi train:**
 
